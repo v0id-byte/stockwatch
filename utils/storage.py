@@ -15,8 +15,11 @@ def _row_to_dict(row: tuple, cols: list[str]) -> dict:
 
 class Storage:
     def __init__(self, db_path: Path | None = None):
-        cfg = get_config()
-        self.db_path = db_path or cfg.db_path
+        if db_path is None:
+            cfg = get_config()
+            self.db_path = cfg.db_path
+        else:
+            self.db_path = Path(db_path).expanduser()
         self.db_path.parent.mkdir(exist_ok=True, parents=True)
         self._init_db()
 

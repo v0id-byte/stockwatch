@@ -1,9 +1,14 @@
 """Alpha158 factor calculation implemented with pandas."""
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pandas as pd
+from pandas.errors import PerformanceWarning
 from loguru import logger
+
+warnings.filterwarnings("ignore", category=PerformanceWarning)
 
 
 WINDOWS = [5, 10, 20, 30, 60]

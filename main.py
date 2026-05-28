@@ -81,8 +81,9 @@ def test():
         print(f"✅ v2 calibration 表可读 → {'已有模型' if model else '暂无模型'}")
         from analysis.factors import compute_alpha158
         import pandas as pd
+        dates = pd.date_range("2026-01-01", periods=70).strftime("%Y-%m-%d")
         demo = pd.DataFrame([
-            {"trade_date": f"2026-01-{i+1:02d}", "open": 10+i*0.1, "high": 10.5+i*0.1,
+            {"trade_date": dates[i], "open": 10+i*0.1, "high": 10.5+i*0.1,
              "low": 9.8+i*0.1, "close": 10.2+i*0.1, "volume": 100000+i*1000, "amount": 0}
             for i in range(70)
         ])

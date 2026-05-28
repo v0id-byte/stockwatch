@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import sys
+import argparse
+import os
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -12,8 +14,13 @@ sys.path.insert(0, str(ROOT))
 from loguru import logger
 
 from analysis.calibration import make_model_row
-from config import get_config
 from utils.storage import Storage
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
 
 
 def _run_date(run_ts: str) -> datetime:
@@ -123,13 +130,40 @@ def train_action(storage: Storage, action: str, min_samples: int):
     print(f"{action}: samples={sample_size}, coef={coef:.4f}, intercept={intercept:.4f}, auc={auc}")
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    return int(raw) if raw else default
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Resolve decisions and train confidence calibration.")
+    parser.add_argument(
+        "--db",
+        default=os.getenv("STOCKWATCH_DB_PATH", "~/.stockwatch/db.sqlite"),
+        help="SQLite DB path, default: ~/.stockwatch/db.sqlite",
+    )
+    parser.add_argument(
+        "--lookback-days",
+        type=int,
+        default=_env_int("CALIBRATION_LOOKBACK_DAYS", 5),
+        help="Forward trading days used to resolve a decision, default: 5",
+    )
+    parser.add_argument(
+        "--min-samples",
+        type=int,
+        default=_env_int("CALIBRATION_MIN_SAMPLES", 50),
+        help="Minimum resolved samples per action before fitting, default: 50",
+    )
+    return parser.parse_args()
+
+
 def main():
-    cfg = get_config()
-    storage = Storage()
-    resolved = resolve_decisions(storage, cfg.calibration_lookback_days)
+    args = parse_args()
+    storage = Storage(Path(args.db).expanduser())
+    resolved = resolve_decisions(storage, args.lookback_days)
     print(f"resolved decisions: {resolved}")
-    train_action(storage, "BUY", cfg.calibration_min_samples)
-    train_action(storage, "SELL", cfg.calibration_min_samples)
+    train_action(storage, "BUY", args.min_samples)
+    train_action(storage, "SELL", args.min_samples)
 
 
 if __name__ == "__main__":
