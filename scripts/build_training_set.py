@@ -11,6 +11,8 @@ sys.path.insert(0, str(ROOT))
 
 from analysis.factors import ALPHA158_FEATURES, compute_alpha158_frame
 
+WARMUP = 60  # 最长滚动窗口，前 60 行因子未填满，丢弃
+
 
 def main():
     import pandas as pd
@@ -31,12 +33,13 @@ def main():
     for path in tqdm(sorted(stock_dir.glob("*.parquet")), desc="factors"):
         code = path.stem
         kline = pd.read_parquet(path)
-        if len(kline) < 80:
+        if len(kline) < WARMUP + 30:
             continue
         factors = compute_alpha158_frame(kline, market)
         factors["code"] = code
         factors["close"] = pd.to_numeric(kline["close"], errors="coerce").values
         factors["forward_5d_return"] = factors["close"].shift(-5) / factors["close"] - 1
+        factors = factors.iloc[WARMUP:].reset_index(drop=True)
         frames.append(factors)
 
     if not frames:

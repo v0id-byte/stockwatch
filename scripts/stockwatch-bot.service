@@ -1,0 +1,19 @@
+[Unit]
+Description=StockWatch 飞书交互式查询机器人
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__STOCKWATCH_USER__
+WorkingDirectory=__STOCKWATCH_HOME__/stockwatch
+Environment="PATH=__STOCKWATCH_HOME__/stockwatch/.venv/bin"
+Environment="PYTHONPATH=__STOCKWATCH_HOME__/stockwatch"
+ExecStart=__STOCKWATCH_HOME__/stockwatch/.venv/bin/python __STOCKWATCH_HOME__/stockwatch/main.py bot
+Restart=on-failure
+RestartSec=30
+StandardOutput=append:__STOCKWATCH_HOME__/.stockwatch/logs/bot.log
+StandardError=append:__STOCKWATCH_HOME__/.stockwatch/logs/bot.log
+
+[Install]
+WantedBy=multi-user.target

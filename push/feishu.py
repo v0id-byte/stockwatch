@@ -55,15 +55,24 @@ class FeishuClient:
 
     def send_message(self, content: dict) -> bool:
         """发送卡片消息给所有接收人，content 是卡片 JSON"""
-        url = f"{self.BASE_URL}/im/v1/messages?receive_id_type={self.cfg.feishu_receive_id_type}"
-        import urllib.request
-
         # 收集所有接收人
         receivers = [self.cfg.feishu_receive_id]
         if self.cfg.feishu_receive_id_2:
             receivers.append(self.cfg.feishu_receive_id_2)
 
-        def _send_to(receive_id: str) -> dict:
+        success = True
+        for rid in receivers:
+            if self.send_card_to(rid, content, self.cfg.feishu_receive_id_type):
+                continue
+            success = False
+        return success
+
+    def send_card_to(self, receive_id: str, content: dict, receive_id_type: str = "chat_id") -> bool:
+        """按指定 receive_id_type 发送交互式卡片。"""
+        url = f"{self.BASE_URL}/im/v1/messages?receive_id_type={receive_id_type}"
+        import urllib.request
+
+        def _send() -> dict:
             payload = {
                 "receive_id": receive_id,
                 "msg_type": "interactive",
@@ -78,23 +87,92 @@ class FeishuClient:
             with urllib.request.urlopen(req, timeout=20) as r:
                 return json.loads(r.read())
 
-        success = True
-        for rid in receivers:
-            try:
-                result = _send_to(rid)
-                if result.get("code") == 99991663:
-                    logger.info("飞书 token 失效，刷新后重试")
-                    self._token = None
-                    result = _send_to(rid)
-                if result.get("code") == 0:
-                    logger.info(f"飞书消息发送成功 -> {rid}")
-                else:
-                    logger.warning(f"飞书发送失败 -> {rid} code={result.get('code')}: {result.get('msg')}")
-                    success = False
-            except Exception as e:
-                logger.error(f"飞书发送异常 -> {rid}: {e}")
-                success = False
-        return success
+        try:
+            result = _send()
+            if result.get("code") == 99991663:
+                logger.info("飞书 token 失效，刷新后重试")
+                self._token = None
+                result = _send()
+            if result.get("code") == 0:
+                logger.info(f"飞书消息发送成功 -> {receive_id}")
+                return True
+            logger.warning(f"飞书发送失败 -> {receive_id} code={result.get('code')}: {result.get('msg')}")
+        except Exception as e:
+            logger.error(f"飞书发送异常 -> {receive_id}: {e}")
+        return False
+
+
+def _format_price(value) -> str:
+    try:
+        price = float(value or 0)
+    except (TypeError, ValueError):
+        price = 0
+    return f"{price:.2f}元" if price > 0 else "—"
+
+
+def _position_lines(d: dict) -> list[str]:
+    action = d.get("action", "HOLD")
+    if action == "BUY":
+        trade_line = (
+            f"买入 {_format_price(d.get('trade_price'))} | "
+            f"目标卖出 {_format_price(d.get('target_price'))} | "
+            f"止损 {_format_price(d.get('stop_loss'))}"
+        )
+    elif action == "SELL":
+        trade_line = (
+            f"卖出 {_format_price(d.get('trade_price'))} | "
+            f"下方目标 {_format_price(d.get('target_price'))} | "
+            f"风控线 {_format_price(d.get('stop_loss'))}"
+        )
+    else:
+        trade_line = ""
+    levels_line = (
+        f"支撑 {_format_price(d.get('support_price'))} | "
+        f"压力 {_format_price(d.get('resistance_price'))}"
+    )
+    basis = d.get("position_basis") or d.get("one_liner", "")
+    basis_line = f"依据：{basis}" if basis else ""
+    return [line for line in (trade_line, levels_line, basis_line) if line]
+
+
+def render_text_card(title: str, lines: list[str], template: str = "blue") -> dict:
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "title": {"tag": "plain_text", "content": title},
+            "template": template,
+        },
+        "elements": [{
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": "\n".join(lines)},
+        }],
+    }
+
+
+def render_single_decision_card(decision: dict, title: str = "股票即时分析",
+                                extra_lines: list[str] | None = None) -> dict:
+    action = decision.get("action", "HOLD")
+    template = "red" if action == "BUY" else "orange" if action == "SELL" else "blue"
+    conf = float(decision.get("confidence") or 0)
+    raw_conf = decision.get("raw_confidence")
+    raw_text = f"（原始 {raw_conf:.0%}）" if raw_conf is not None and abs(float(raw_conf) - conf) > 0.005 else ""
+    reasons = json.loads(decision.get("reasons_json") or "[]")
+    risks = json.loads(decision.get("risks_json") or "[]")
+    lines = [
+        f"**{decision.get('name', decision.get('code'))}**({decision.get('code')}) {action}",
+        f"置信度 {conf:.0%}{raw_text}",
+        *_position_lines(decision),
+    ]
+    if extra_lines:
+        lines.extend(extra_lines)
+    if decision.get("one_liner"):
+        lines.append(f"一句话：{decision['one_liner']}")
+    if reasons:
+        lines.append("原因：" + "；".join(str(item) for item in reasons[:3]))
+    if risks:
+        lines.append("风险：" + "；".join(str(item) for item in risks[:2]))
+    lines.append("*仅供研究参考，不构成投资建议*")
+    return render_text_card(title, lines, template=template)
 
 
 def render_card(run_id: str, decisions: list[dict], regime_info: dict | None = None) -> dict:
@@ -152,16 +230,16 @@ def render_card(run_id: str, decisions: list[dict], regime_info: dict | None = N
             conf = d.get("confidence", 0)
             raw_conf = d.get("raw_confidence")
             stars = "⭐" * max(1, min(5, int(conf * 5)))
-            price_str = f'目标价 {d.get("target_price", "—")}元' if d.get("target_price") else ""
-            stop_str = f'止损 {d.get("stop_loss", "—")}元' if d.get("stop_loss") else ""
             raw_str = f" 原始 {raw_conf:.0%}" if raw_conf is not None and abs(raw_conf - conf) > 0.005 else ""
+            position_text = "\n".join(_position_lines(d))
+            position_text = f"\n{position_text}" if position_text else ""
             elements.append({
                 "tag": "div",
                 "text": {
                     "tag": "lark_md",
                     "content": (
                         f"**{d['name']}**({d['code']}) {action}\n"
-                        f"{stars} 校准置信度 {conf:.0%}{raw_str} {price_str} {stop_str}\n"
+                        f"{stars} 校准置信度 {conf:.0%}{raw_str}{position_text}\n"
                         f"📝 {d.get('one_liner', '—')}"
                     )
                 }

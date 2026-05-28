@@ -40,6 +40,9 @@ python main.py once
 # 守护进程模式（按调度自动运行）
 systemctl start stockwatch
 systemctl status stockwatch
+
+# 飞书交互式查询机器人（SDK 长连接）
+python main.py bot
 ```
 
 ---
@@ -79,6 +82,20 @@ sqlite3 ~/.stockwatch/db.sqlite "SELECT run_id, code, name, action, confidence, 
 - **15:15** 收盘后：全天复盘 + 次日观察
 
 非交易日（周末/节假日）自动跳过。
+
+## 飞书交互式查询
+
+开启 `stockwatch-bot` 后，可以在飞书里直接给机器人发消息：
+
+```text
+600519
+买入 600519 1680
+买入 600519 1680 100股
+卖出 600519
+停止跟踪 600519
+```
+
+`股票代码` 会即时回复单只股票分析；`买入` 会写入持仓跟踪，后续定时盯盘会把这只股票加入分析池，触发止损、接近目标价或模型转为 SELL 时主动推送；`卖出` 会停止跟踪。
 
 ---
 

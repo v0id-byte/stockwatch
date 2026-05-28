@@ -80,6 +80,14 @@ class Config:
     def feishu_receive_id_2(self) -> str:
         return os.getenv("FEISHU_RECEIVE_ID_2", "")
 
+    @property
+    def feishu_verification_token(self) -> str:
+        return os.getenv("FEISHU_VERIFICATION_TOKEN", "")
+
+    @property
+    def feishu_encrypt_key(self) -> str:
+        return os.getenv("FEISHU_ENCRYPT_KEY", "")
+
     # === 数据源 ===
     @property
     def tushare_token(self) -> str:

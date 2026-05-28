@@ -1,0 +1,66 @@
+"""Parse simple stock bot commands from Feishu text messages."""
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+
+
+_CODE_RE = re.compile(r"(?<!\d)(\d{6})(?!\d)")
+_BUY_RE = re.compile(r"^(买入|买|跟踪|建仓)[+\s,，:：]*(\d{6})(?:[+\s,，:：]*(\d+(?:\.\d+)?))?(?:[+\s,，]*(\d+(?:\.\d+)?)(?:股)?)?")
+_SELL_RE = re.compile(r"^(卖出|卖|停止跟踪|取消跟踪|不跟了)[+\s,，:：]*(\d{6})")
+
+
+@dataclass
+class BotCommand:
+    action: str
+    code: str = ""
+    price: float | None = None
+    quantity: float | None = None
+
+
+def _to_float(raw: str | None) -> float | None:
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
+def normalize_text(text: str) -> str:
+    text = re.sub(r"<at[^>]*>.*?</at>", "", text or "")
+    return text.replace("\u3000", " ").strip()
+
+
+def parse_command(text: str) -> BotCommand:
+    text = normalize_text(text)
+    if not text or text.lower() in {"help", "帮助", "?"}:
+        return BotCommand("help")
+
+    sell = _SELL_RE.search(text)
+    if sell:
+        return BotCommand("sell", code=sell.group(2))
+
+    buy = _BUY_RE.search(text)
+    if buy:
+        return BotCommand(
+            "buy",
+            code=buy.group(2),
+            price=_to_float(buy.group(3)),
+            quantity=_to_float(buy.group(4)),
+        )
+
+    code = _CODE_RE.search(text)
+    if code:
+        return BotCommand("query", code=code.group(1))
+
+    return BotCommand("help")
+
+
+def help_lines() -> list[str]:
+    return [
+        "**可用命令**",
+        "查股票：`600519` 或 `查 600519`",
+        "开始跟踪：`买入 600519 1680`，可追加数量：`买入 600519 1680 100股`",
+        "停止跟踪：`卖出 600519` 或 `停止跟踪 600519`",
+    ]

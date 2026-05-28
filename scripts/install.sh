@@ -53,6 +53,17 @@ if [ -f "$SERVICE_FILE" ]; then
 else
     echo "  警告: $SERVICE_FILE 不存在，跳过服务安装"
 fi
+BOT_SERVICE_FILE="$WORKDIR/scripts/stockwatch-bot.service"
+if [ -f "$BOT_SERVICE_FILE" ]; then
+    ACTUAL_USER="$(whoami)"
+    BOT_SERVICE_TMP="$(mktemp)"
+    sed "s|__STOCKWATCH_HOME__|$HOME|g; s|__STOCKWATCH_USER__|$ACTUAL_USER|g" "$BOT_SERVICE_FILE" > "$BOT_SERVICE_TMP"
+    sudo cp "$BOT_SERVICE_TMP" /etc/systemd/system/stockwatch-bot.service
+    rm -f "$BOT_SERVICE_TMP"
+    sudo systemctl daemon-reload
+    sudo systemctl enable stockwatch-bot
+    echo "  飞书机器人服务已 enable"
+fi
 
 # ---- 每周校准任务 ----
 if [ -f "$WORKDIR/scripts/train_calibration.py" ]; then
@@ -75,6 +86,7 @@ echo "  2. 测试连接:  cd $WORKDIR && source .venv/bin/activate && python mai
 echo "  3. 手动运行:  cd $WORKDIR && source .venv/bin/activate && python main.py once"
 echo "  4. 查看日志:  tail -f ~/.stockwatch/logs/"
 echo "  5. 启动服务:  systemctl start stockwatch && systemctl status stockwatch"
+echo "  6. 启动飞书机器人: systemctl start stockwatch-bot && systemctl status stockwatch-bot"
 echo ""
 echo "  飞书权限提示：请在 https://open.feishu.cn/app 开启 im:message 和 im:message:send_as_bot 权限"
 echo "============================================"

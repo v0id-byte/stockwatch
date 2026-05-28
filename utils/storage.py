@@ -92,6 +92,26 @@ class Storage:
             excess_return_5d REAL,
             PRIMARY KEY (sector, trade_date)
         );
+        CREATE TABLE IF NOT EXISTS tracked_positions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT,
+            chat_id TEXT,
+            code TEXT NOT NULL,
+            name TEXT,
+            buy_price REAL,
+            quantity REAL,
+            stop_loss REAL,
+            target_price REAL,
+            status TEXT NOT NULL DEFAULT 'active',
+            opened_at TEXT NOT NULL,
+            closed_at TEXT,
+            last_notified_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS bot_events (
+            event_id TEXT PRIMARY KEY,
+            message_id TEXT,
+            handled_at TEXT NOT NULL
+        );
         """)
 
     @staticmethod
@@ -293,3 +313,83 @@ class Storage:
                 ORDER BY run_ts ASC
             """, [action]).fetchall()
         return [dict(r) for r in rows]
+
+    def is_bot_event_handled(self, event_id: str) -> bool:
+        if not event_id:
+            return False
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM bot_events WHERE event_id=? LIMIT 1",
+                [event_id],
+            ).fetchone()
+        return row is not None
+
+    def mark_bot_event_handled(self, event_id: str, message_id: str = ""):
+        if not event_id:
+            return
+        with self._conn() as conn:
+            conn.execute("""
+                INSERT OR IGNORE INTO bot_events (event_id, message_id, handled_at)
+                VALUES (?, ?, ?)
+            """, [event_id, message_id, datetime.now().isoformat()])
+
+    def upsert_tracked_position(self, row: dict):
+        now = datetime.now().isoformat()
+        payload = {
+            "user_id": row.get("user_id", ""),
+            "chat_id": row.get("chat_id", ""),
+            "code": row["code"],
+            "name": row.get("name", row["code"]),
+            "buy_price": row.get("buy_price", 0),
+            "quantity": row.get("quantity"),
+            "stop_loss": row.get("stop_loss", 0),
+            "target_price": row.get("target_price", 0),
+            "opened_at": row.get("opened_at", now),
+        }
+        with self._conn() as conn:
+            existing = conn.execute("""
+                SELECT id FROM tracked_positions
+                WHERE user_id=? AND code=? AND status='active'
+                ORDER BY opened_at DESC LIMIT 1
+            """, [payload["user_id"], payload["code"]]).fetchone()
+            if existing:
+                conn.execute("""
+                    UPDATE tracked_positions
+                    SET chat_id=:chat_id, name=:name, buy_price=:buy_price,
+                        quantity=:quantity, stop_loss=:stop_loss,
+                        target_price=:target_price, opened_at=:opened_at,
+                        closed_at=NULL
+                    WHERE id=:id
+                """, {**payload, "id": existing[0]})
+            else:
+                conn.execute("""
+                    INSERT INTO tracked_positions
+                    (user_id, chat_id, code, name, buy_price, quantity, stop_loss, target_price, status, opened_at)
+                    VALUES (:user_id, :chat_id, :code, :name, :buy_price, :quantity, :stop_loss, :target_price, 'active', :opened_at)
+                """, payload)
+
+    def close_tracked_position(self, user_id: str, code: str) -> int:
+        with self._conn() as conn:
+            cur = conn.execute("""
+                UPDATE tracked_positions
+                SET status='closed', closed_at=?
+                WHERE user_id=? AND code=? AND status='active'
+            """, [datetime.now().isoformat(), user_id or "", code])
+            return cur.rowcount
+
+    def get_active_tracked_positions(self) -> list[dict]:
+        with self._conn() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute("""
+                SELECT * FROM tracked_positions
+                WHERE status='active'
+                ORDER BY opened_at ASC
+            """).fetchall()
+        return [dict(r) for r in rows]
+
+    def mark_position_notified(self, position_id: int):
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE tracked_positions SET last_notified_at=? WHERE id=?",
+                [datetime.now().isoformat(), position_id],
+            )

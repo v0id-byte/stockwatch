@@ -42,6 +42,25 @@ def _format_north_context(items: list[dict]) -> str:
     return "北向净买入Top5: " + "、".join(parts)
 
 
+def _tracked_alert_reason(position: dict, decision: dict) -> str:
+    if not position:
+        return ""
+    today = datetime.now().date().isoformat()
+    last_notified = str(position.get("last_notified_at") or "")
+    if last_notified.startswith(today):
+        return ""
+    current_price = float(decision.get("_current_price") or 0)
+    stop_loss = float(position.get("stop_loss") or decision.get("stop_loss") or 0)
+    target_price = float(position.get("target_price") or decision.get("target_price") or 0)
+    if stop_loss > 0 and current_price > 0 and current_price <= stop_loss:
+        return f"持仓跟踪：现价 {current_price:.2f} 跌破止损 {stop_loss:.2f}"
+    if target_price > 0 and current_price > 0 and current_price >= target_price * 0.98:
+        return f"持仓跟踪：现价 {current_price:.2f} 接近目标 {target_price:.2f}"
+    if decision.get("action") == "SELL" and decision.get("confidence", 0) >= 0.6:
+        return "持仓跟踪：模型转为 SELL，建议复核仓位"
+    return ""
+
+
 def test():
     """测试 AKShare / MiniMax / 飞书 连接"""
     print("=" * 40)
@@ -129,6 +148,11 @@ def once():
 
     # 1. 构建分析池
     codes = universe.get_today_codes()
+    tracked_positions = storage.get_active_tracked_positions()
+    tracked_by_code = {pos["code"]: pos for pos in tracked_positions}
+    for pos in tracked_positions:
+        if pos["code"] not in codes:
+            codes.append(pos["code"])
     logger.info(f"分析池: {len(codes)} 只")
     if not codes:
         logger.info("分析池为空，结束")
@@ -256,6 +280,11 @@ def once():
             sector_context=sector_contexts.get(d["code"], "所属板块: 未知"),
             confidence_floor=confidence_floor,
         )
+        tracked_reason = _tracked_alert_reason(tracked_by_code.get(d["code"]), decision)
+        if tracked_reason:
+            decision["one_liner"] = tracked_reason[:50]
+            decision["_will_push"] = True
+            storage.mark_position_notified(tracked_by_code[d["code"]]["id"])
         if decision.get("_will_push"):
             run_results.append(decision)
         storage.insert_decision(run_id, datetime.now().isoformat(), decision)
@@ -338,7 +367,7 @@ def daemon():
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python main.py [test|once|daemon]")
+        print("Usage: python main.py [test|once|daemon|bot]")
         sys.exit(1)
 
     mode = sys.argv[1]
@@ -348,5 +377,9 @@ if __name__ == "__main__":
         once()
     elif mode == "daemon":
         daemon()
+    elif mode == "bot":
+        _setup_log()
+        from bot.runner import run_bot
+        run_bot()
     else:
         print(f"Unknown mode: {mode}")
