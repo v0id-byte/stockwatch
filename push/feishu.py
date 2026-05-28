@@ -54,13 +54,18 @@ class FeishuClient:
             raise
 
     def send_message(self, content: dict) -> bool:
-        """发送卡片消息，content 是卡片 JSON"""
+        """发送卡片消息给所有接收人，content 是卡片 JSON"""
         url = f"{self.BASE_URL}/im/v1/messages?receive_id_type={self.cfg.feishu_receive_id_type}"
         import urllib.request
 
-        def _send_once() -> dict:
+        # 收集所有接收人
+        receivers = [self.cfg.feishu_receive_id]
+        if self.cfg.feishu_receive_id_2:
+            receivers.append(self.cfg.feishu_receive_id_2)
+
+        def _send_to(receive_id: str) -> dict:
             payload = {
-                "receive_id": self.cfg.feishu_receive_id,
+                "receive_id": receive_id,
                 "msg_type": "interactive",
                 "content": json.dumps(content, ensure_ascii=False),
             }
@@ -73,20 +78,23 @@ class FeishuClient:
             with urllib.request.urlopen(req, timeout=20) as r:
                 return json.loads(r.read())
 
-        try:
-            result = _send_once()
-            if result.get("code") == 99991663:
-                logger.info("飞书 token 失效，刷新后重试")
-                self._token = None
-                result = _send_once()
-            if result.get("code") == 0:
-                logger.info("飞书消息发送成功")
-                return True
-            logger.warning(f"飞书发送失败 code={result.get('code')}: {result.get('msg')}")
-            return False
-        except Exception as e:
-            logger.error(f"飞书发送异常: {e}")
-            return False
+        success = True
+        for rid in receivers:
+            try:
+                result = _send_to(rid)
+                if result.get("code") == 99991663:
+                    logger.info("飞书 token 失效，刷新后重试")
+                    self._token = None
+                    result = _send_to(rid)
+                if result.get("code") == 0:
+                    logger.info(f"飞书消息发送成功 -> {rid}")
+                else:
+                    logger.warning(f"飞书发送失败 -> {rid} code={result.get('code')}: {result.get('msg')}")
+                    success = False
+            except Exception as e:
+                logger.error(f"飞书发送异常 -> {rid}: {e}")
+                success = False
+        return success
 
 
 def render_card(run_id: str, decisions: list[dict], regime_info: dict | None = None) -> dict:

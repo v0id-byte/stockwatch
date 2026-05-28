@@ -71,10 +71,14 @@ class Config:
     @property
     def feishu_receive_id(self) -> str:
         return os.getenv("FEISHU_RECEIVE_ID", "")
-
-    @property
     def feishu_receive_id_type(self) -> str:
         return os.getenv("FEISHU_RECEIVE_ID_TYPE", "open_id")
+
+    @property
+    def feishu_receive_id_2(self) -> str:
+        return os.getenv("FEISHU_RECEIVE_ID_2", "")
+
+    @property
 
     # === 数据源 ===
     @property
