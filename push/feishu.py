@@ -109,6 +109,10 @@ def render_card(run_id: str, decisions: list[dict], regime_info: dict | None = N
     strong_signals = [d for d in decisions if d.get("action") in ("BUY", "SELL") and d.get("confidence", 0) >= 0.75]
     watch_signals = [d for d in decisions if d.get("action") in ("BUY", "SELL") and 0.6 <= d.get("confidence", 0) < 0.75]
     hold_notes = [d for d in decisions if d.get("action") == "HOLD" and d.get("confidence", 0) >= 0.65]
+    has_visible_signal = bool(strong_signals or watch_signals or hold_notes)
+    if not has_visible_signal and not (regime_info and regime_info.get("regime") == "crisis"):
+        logger.info("飞书卡片无可展示信号，跳过发送")
+        return None
 
     # 卡片头颜色：优先红>绿>蓝
     if regime_info and regime_info.get("regime") == "crisis":

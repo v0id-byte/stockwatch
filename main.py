@@ -263,14 +263,18 @@ def once():
     # 6. 推送
     feishu = FeishuClient()
     push_ok = False
+    push_status = "无可推送信号"
     if run_results:
         card = render_card(run_id, run_results, regime_info=regime_info if cfg.enable_regime else None)
         if card:
             push_ok = feishu.send_message(card)
+            push_status = "成功" if push_ok else "失败"
             for d in run_results:
                 storage.mark_decision_pushed(run_id, d["code"], push_ok)
                 if not push_ok:
                     break
+        else:
+            push_status = "无可展示信号"
 
     # 7. 记录统计
     tokens_used = get_token_usage()
@@ -285,10 +289,10 @@ def once():
     logger.info(
         f"===== 运行结束 {run_id} =====\n"
         f"  分析: {len(decisions)} 只 | LLM调用: {llm_calls} 次 | "
-        f"推送: {'成功' if push_ok else '失败'} ({len(run_results)} 条)"
+        f"推送: {push_status} ({len(run_results)} 条)"
     )
 
-    print(f"\n完成！分析 {len(decisions)} 只，推送 {'成功' if push_ok else '失败'}\n")
+    print(f"\n完成！分析 {len(decisions)} 只，推送 {push_status}\n")
 
 
 def daemon():
