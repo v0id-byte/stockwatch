@@ -82,6 +82,61 @@ sqlite3 ~/.stockwatch/db.sqlite "SELECT run_id, code, name, action, confidence, 
 
 ---
 
+## v2 升级路径
+
+```bash
+cd ~/stockwatch && source .venv/bin/activate
+
+# 1. 拉取新代码后先做增量迁移（可重复执行）
+python scripts/migrate_v2.py
+
+# 2. 编辑 .env，按模块逐个开启
+nano ~/stockwatch/.env
+
+# 3. 先自检，再重启服务
+python main.py test
+systemctl restart stockwatch
+```
+
+v2 新增开关默认关闭：
+
+```bash
+ENABLE_CALIBRATION=false
+CALIBRATION_LOOKBACK_DAYS=5
+CALIBRATION_MIN_SAMPLES=50
+
+ENABLE_ALPHA158=false
+
+ENABLE_LGBM=false
+LGBM_MODEL_PATH=~/.stockwatch/models/lgbm.txt
+
+ENABLE_REGIME=false
+
+ENABLE_SECTOR=false
+```
+
+建议开启顺序：`ENABLE_REGIME` → `ENABLE_SECTOR` → `ENABLE_ALPHA158` → `ENABLE_CALIBRATION` → `ENABLE_LGBM`。
+
+### LightGBM 离线训练
+
+```bash
+# 在 Mac 上
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+pip install -r requirements-train.txt
+
+python scripts/bootstrap_history.py
+python scripts/build_training_set.py
+python scripts/train_lgbm.py
+
+# 输出 models/lgbm.txt 和 models/lgbm_meta.json 后，拷到树莓派
+scp models/lgbm.* pi@<rpi_ip>:~/.stockwatch/models/
+```
+
+树莓派推理端只在 `ENABLE_LGBM=true` 时加载模型；模型缺失会记录日志并跳过。
+
+---
+
 ## 卸载
 
 ```bash

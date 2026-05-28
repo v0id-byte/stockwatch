@@ -53,6 +53,52 @@ class Storage:
             CREATE INDEX IF NOT EXISTS idx_decisions_run ON decisions(run_id);
             CREATE INDEX IF NOT EXISTS idx_news_code ON news(code);
             """)
+            self._migrate_v2(conn)
+
+    def _migrate_v2(self, conn: sqlite3.Connection):
+        self._add_column(conn, "decisions", "raw_confidence", "raw_confidence REAL")
+        self._add_column(conn, "decisions", "calibrated_confidence", "calibrated_confidence REAL")
+        self._add_column(conn, "decisions", "resolved_at", "resolved_at TEXT")
+        self._add_column(conn, "decisions", "success", "success INTEGER")
+        conn.executescript("""
+        CREATE TABLE IF NOT EXISTS calibration_model (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            action TEXT NOT NULL,
+            trained_at TEXT NOT NULL,
+            sample_size INTEGER,
+            coef REAL,
+            intercept REAL,
+            auc REAL,
+            notes TEXT
+        );
+        CREATE TABLE IF NOT EXISTS market_regime_history (
+            trade_date TEXT PRIMARY KEY,
+            vol_20d REAL,
+            regime TEXT,
+            percentile REAL
+        );
+        CREATE TABLE IF NOT EXISTS stock_sector_map (
+            code TEXT PRIMARY KEY,
+            sector TEXT,
+            updated_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS sector_strength (
+            sector TEXT,
+            trade_date TEXT,
+            return_5d REAL,
+            excess_return_5d REAL,
+            PRIMARY KEY (sector, trade_date)
+        );
+        """)
+
+    @staticmethod
+    def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        return any(row[1] == column for row in rows)
+
+    def _add_column(self, conn: sqlite3.Connection, table: str, column: str, ddl: str):
+        if not self._column_exists(conn, table, column):
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
 
     def _conn(self) -> sqlite3.Connection:
         return sqlite3.connect(str(self.db_path), check_same_thread=False)
@@ -112,9 +158,18 @@ class Storage:
         with self._conn() as conn:
             conn.execute("""
                 INSERT INTO decisions
-                (run_id, run_ts, code, name, action, confidence, target_price, stop_loss, reasons_json, risks_json, one_liner, pushed, push_error)
-                VALUES (:run_id, :run_ts, :code, :name, :action, :confidence, :target_price, :stop_loss, :reasons_json, :risks_json, :one_liner, 0, NULL)
-            """, {"run_id": run_id, "run_ts": run_ts, **dec})
+                (run_id, run_ts, code, name, action, confidence, raw_confidence, calibrated_confidence,
+                 target_price, stop_loss, reasons_json, risks_json, one_liner, pushed, push_error)
+                VALUES (:run_id, :run_ts, :code, :name, :action, :confidence, :raw_confidence,
+                        :calibrated_confidence, :target_price, :stop_loss, :reasons_json, :risks_json,
+                        :one_liner, 0, NULL)
+            """, {
+                "raw_confidence": dec.get("raw_confidence"),
+                "calibrated_confidence": dec.get("calibrated_confidence", dec.get("confidence")),
+                "run_id": run_id,
+                "run_ts": run_ts,
+                **dec,
+            })
 
     def get_decisions_by_run(self, run_id: str) -> list[dict]:
         with self._conn() as conn:
@@ -143,4 +198,95 @@ class Storage:
             rows = conn.execute(
                 "SELECT * FROM runs ORDER BY run_ts DESC LIMIT ?", [limit]
             ).fetchall()
+        return [dict(r) for r in rows]
+
+    def upsert_market_regime_history(self, rows: list[dict]):
+        if not rows:
+            return
+        with self._conn() as conn:
+            conn.executemany("""
+                INSERT OR REPLACE INTO market_regime_history (trade_date, vol_20d, regime, percentile)
+                VALUES (:trade_date, :vol_20d, :regime, :percentile)
+            """, rows)
+
+    def get_cached_stock_sectors(self, codes: list[str], max_age_days: int = 30) -> dict[str, str]:
+        if not codes:
+            return {}
+        cutoff = (datetime.now() - timedelta(days=max_age_days)).isoformat()
+        placeholders = ",".join("?" for _ in codes)
+        with self._conn() as conn:
+            rows = conn.execute(
+                f"SELECT code, sector FROM stock_sector_map WHERE code IN ({placeholders}) AND updated_at>=?",
+                [*codes, cutoff],
+            ).fetchall()
+        return {code: sector for code, sector in rows}
+
+    def upsert_stock_sectors(self, mapping: dict[str, str]):
+        if not mapping:
+            return
+        now = datetime.now().isoformat()
+        with self._conn() as conn:
+            conn.executemany("""
+                INSERT OR REPLACE INTO stock_sector_map (code, sector, updated_at)
+                VALUES (?, ?, ?)
+            """, [(code, sector, now) for code, sector in mapping.items()])
+
+    def upsert_sector_strength(self, rows: list[dict]):
+        if not rows:
+            return
+        with self._conn() as conn:
+            conn.executemany("""
+                INSERT OR REPLACE INTO sector_strength (sector, trade_date, return_5d, excess_return_5d)
+                VALUES (:sector, :trade_date, :return_5d, :excess_return_5d)
+            """, rows)
+
+    def get_sector_strength(self, sector: str) -> dict | None:
+        with self._conn() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute("""
+                SELECT * FROM sector_strength WHERE sector=? ORDER BY trade_date DESC LIMIT 1
+            """, [sector]).fetchone()
+        return dict(row) if row else None
+
+    def get_latest_calibration_model(self, action: str) -> dict | None:
+        with self._conn() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute("""
+                SELECT * FROM calibration_model WHERE action=?
+                ORDER BY trained_at DESC, id DESC LIMIT 1
+            """, [action]).fetchone()
+        return dict(row) if row else None
+
+    def insert_calibration_model(self, row: dict):
+        with self._conn() as conn:
+            conn.execute("""
+                INSERT INTO calibration_model (action, trained_at, sample_size, coef, intercept, auc, notes)
+                VALUES (:action, :trained_at, :sample_size, :coef, :intercept, :auc, :notes)
+            """, row)
+
+    def mark_decision_resolved(self, decision_id: int, success: int | None):
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE decisions SET resolved_at=?, success=? WHERE id=?",
+                [datetime.now().isoformat(), success, decision_id],
+            )
+
+    def get_unresolved_action_decisions(self, limit: int = 500) -> list[dict]:
+        with self._conn() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute("""
+                SELECT * FROM decisions
+                WHERE action IN ('BUY', 'SELL') AND resolved_at IS NULL
+                ORDER BY run_ts ASC LIMIT ?
+            """, [limit]).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_calibration_samples(self, action: str) -> list[dict]:
+        with self._conn() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute("""
+                SELECT confidence, raw_confidence, success FROM decisions
+                WHERE action=? AND success IN (0, 1)
+                ORDER BY run_ts ASC
+            """, [action]).fetchall()
         return [dict(r) for r in rows]

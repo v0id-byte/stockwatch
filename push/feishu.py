@@ -89,7 +89,7 @@ class FeishuClient:
             return False
 
 
-def render_card(run_id: str, decisions: list[dict]) -> dict:
+def render_card(run_id: str, decisions: list[dict], regime_info: dict | None = None) -> dict:
     """
     渲染飞书交互式卡片，返回卡片 JSON payload
     decisions: 已过滤并按 confidence + action 排序的决策列表
@@ -103,7 +103,10 @@ def render_card(run_id: str, decisions: list[dict]) -> dict:
     hold_notes = [d for d in decisions if d.get("action") == "HOLD" and d.get("confidence", 0) >= 0.65]
 
     # 卡片头颜色：优先红>绿>蓝
-    if any(d.get("action") == "BUY" for d in strong_signals):
+    if regime_info and regime_info.get("regime") == "crisis":
+        header_color = "red"
+        header_title = "⚠️ 高波动风险提示"
+    elif any(d.get("action") == "BUY" for d in strong_signals):
         header_color = "red"
         header_title = "🔥 今日强烈推荐信号"
     elif any(d.get("action") == "SELL" for d in strong_signals):
@@ -114,6 +117,14 @@ def render_card(run_id: str, decisions: list[dict]) -> dict:
         header_title = "📌 今日持仓观察"
 
     elements = []
+    if regime_info and regime_info.get("regime") == "crisis":
+        elements.append({
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": f"⚠️ {regime_info.get('context', '大盘波动处于高位')}"
+            }
+        })
 
     # 函数：添加信号分组块
     def add_signal_group(title_emoji: str, title: str, items: list):
@@ -127,16 +138,18 @@ def render_card(run_id: str, decisions: list[dict]) -> dict:
         for d in items:
             action = d.get("action", "HOLD")
             conf = d.get("confidence", 0)
+            raw_conf = d.get("raw_confidence")
             stars = "⭐" * max(1, min(5, int(conf * 5)))
             price_str = f'目标价 {d.get("target_price", "—")}元' if d.get("target_price") else ""
             stop_str = f'止损 {d.get("stop_loss", "—")}元' if d.get("stop_loss") else ""
+            raw_str = f" 原始 {raw_conf:.0%}" if raw_conf is not None and abs(raw_conf - conf) > 0.005 else ""
             elements.append({
                 "tag": "div",
                 "text": {
                     "tag": "lark_md",
                     "content": (
                         f"**{d['name']}**({d['code']}) {action}\n"
-                        f"{stars} 置信度 {conf:.0%} {price_str} {stop_str}\n"
+                        f"{stars} 校准置信度 {conf:.0%}{raw_str} {price_str} {stop_str}\n"
                         f"📝 {d.get('one_liner', '—')}"
                     )
                 }
@@ -155,6 +168,7 @@ def render_card(run_id: str, decisions: list[dict]) -> dict:
             "tag": "lark_md",
             "content": (
                 f"📅 更新时间：{run_time}\n"
+                f"{'📊 ' + regime_info.get('context', '') + chr(10) if regime_info else ''}"
                 f"📡 数据来源：AKShare + MiniMax\n"
                 f"⚠️ *本推送仅供研究参考，不构成投资建议，A 股投资有风险，入市需谨慎*"
             )

@@ -104,6 +104,42 @@ class MarketData:
             return []
 
     @staticmethod
+    def get_index_kline(index_code: str = "sh000001", limit: int = 800) -> list[dict]:
+        """腾讯财经指数日线，index_code 形如 sh000001 / sh000300。"""
+        try:
+            url = (f"https://web.ifzq.gtimg.cn/appstock/app/kline/kline"
+                   f"?_var=kline_day&param={index_code},day,,,{limit}")
+            resp = requests.get(url, headers=HEADERS, timeout=10)
+            resp.encoding = 'utf-8'
+            text = resp.text.strip()
+            start = text.find('{')
+            end = text.rfind('}') + 1
+            if start < 0 or end <= start:
+                return []
+            data = json.loads(text[start:end])
+            day_data = data.get("data", {}).get(index_code, {}).get("day", [])
+            records = []
+            for item in day_data:
+                if len(item) < 6:
+                    continue
+                try:
+                    records.append({
+                        "trade_date": item[0],
+                        "open": float(item[1]),
+                        "close": float(item[2]),
+                        "high": float(item[3]),
+                        "low": float(item[4]),
+                        "volume": float(item[5]),
+                        "amount": 0,
+                    })
+                except (ValueError, IndexError):
+                    continue
+            return records
+        except Exception as e:
+            logger.warning(f"指数K线获取失败 {index_code}: {e}")
+            return []
+
+    @staticmethod
     def get_index_pct(index_code: str = "sh000001") -> float:
         """获取指数实时涨跌幅，默认上证指数。"""
         try:

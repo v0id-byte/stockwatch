@@ -54,6 +54,17 @@ else
     echo "  警告: $SERVICE_FILE 不存在，跳过服务安装"
 fi
 
+# ---- 每周校准任务 ----
+if [ -f "$WORKDIR/scripts/train_calibration.py" ]; then
+    ACTUAL_USER="$(whoami)"
+    mkdir -p "$HOME/.stockwatch/logs"
+    CRON_TMP="$(mktemp)"
+    echo "0 2 * * 0 $ACTUAL_USER cd $WORKDIR && $WORKDIR/.venv/bin/python scripts/train_calibration.py >> $HOME/.stockwatch/logs/calibration.log 2>&1" > "$CRON_TMP"
+    sudo cp "$CRON_TMP" /etc/cron.d/stockwatch-calibration
+    rm -f "$CRON_TMP"
+    echo "  calibration 每周重训 cron 已安装"
+fi
+
 echo ""
 echo "============================================"
 echo "  安装完成！"
