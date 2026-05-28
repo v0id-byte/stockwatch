@@ -1,0 +1,19 @@
+[Unit]
+Description=StockWatch A股智能盯盘系统
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=rpi
+WorkingDirectory=/home/rpi/stockwatch
+Environment="PATH=/home/rpi/stockwatch/.venv/bin"
+Environment="PYTHONPATH=/home/rpi/stockwatch"
+ExecStart=/home/rpi/stockwatch/.venv/bin/python /home/rpi/stockwatch/main.py daemon
+Restart=on-failure
+RestartSec=30
+StandardOutput=append:/home/rpi/.stockwatch/logs/daemon.log
+StandardError=append:/home/rpi/.stockwatch/logs/daemon.log
+
+[Install]
+WantedBy=multi-user.target
