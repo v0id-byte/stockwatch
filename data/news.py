@@ -1,6 +1,6 @@
 """新闻 + 公告 + 财联社电报"""
 import hashlib
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta
 from loguru import logger
 
 import akshare as ak
@@ -15,6 +15,7 @@ class NewsData:
     def get_news(code: str, days: int = 7) -> list[dict]:
         """获取近 days 天个股新闻"""
         results = []
+        cutoff = datetime.now() - timedelta(days=days)
         try:
             df = ak.stock_news_em(symbol=code)
             for _, row in df.iterrows():
@@ -22,6 +23,8 @@ class NewsData:
                     dt = datetime.strptime(str(row.get("发布时间", "")), "%Y-%m-%d %H:%M:%S")
                 except Exception:
                     dt = datetime.now()
+                if dt < cutoff:
+                    continue
                 results.append({
                     "title": str(row.get("新闻标题", ""))[:200],
                     "content": str(row.get("新闻内容", ""))[:1000],
@@ -39,25 +42,46 @@ class NewsData:
             if h not in seen:
                 seen.add(h)
                 unique.append(item)
+        unique.sort(key=lambda item: item["ts"], reverse=True)
         return unique[:30]
 
     @staticmethod
     def get_telegraph() -> list[dict]:
-        """获取财联社/央视电报（大盘情绪用）"""
+        """获取财联社电报（大盘情绪用）"""
         items = []
         try:
-            df = ak.news_cctv()
+            telegraph_func = getattr(ak, "stock_telegraph_cls", None) or getattr(ak, "stock_info_global_cls")
+            df = telegraph_func()
             for _, row in df.iterrows():
-                try:
-                    dt = datetime.strptime(str(row.get("date", "")), "%Y-%m-%d")
-                except Exception:
-                    dt = datetime.now()
+                ts_raw = (
+                    row.get("发布日期")
+                    or row.get("发布时间")
+                    or row.get("时间")
+                    or row.get("date")
+                    or ""
+                )
+                dt = NewsData._parse_datetime(ts_raw)
+                title = row.get("标题") or row.get("title") or row.get("内容") or ""
+                content = row.get("内容") or row.get("摘要") or row.get("content") or title
                 items.append({
-                    "title": str(row.get("title", ""))[:200],
-                    "content": str(row.get("content", ""))[:500],
-                    "source": "央视新闻",
+                    "title": str(title)[:200],
+                    "content": str(content)[:500],
+                    "source": "财联社",
                     "ts": dt.isoformat(),
                 })
         except Exception as e:
-            logger.warning(f"财联社/央视电报获取失败: {e}")
+            logger.warning(f"财联社电报获取失败: {e}")
         return items[:20]
+
+    @staticmethod
+    def _parse_datetime(value) -> datetime:
+        text = str(value).strip()
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(text, fmt)
+            except Exception:
+                pass
+        try:
+            return datetime.fromisoformat(text)
+        except Exception:
+            return datetime.now()

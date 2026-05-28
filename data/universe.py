@@ -1,5 +1,7 @@
 """分析池构建：自选股 + 热门拓展池"""
-from datetime import date, datetime
+from datetime import date
+import re
+
 from loguru import logger
 
 import akshare as ak
@@ -7,7 +9,7 @@ import akshare as ak
 from config import get_config
 from data.market import MarketData
 
-# 简单节假日（周末已跳过，最简化处理）
+# AKShare 交易日历不可用或数据过期时的 2026 年节假日兜底表，需要每年更新。
 _HOLIDAYS_2026 = {
     "2026-01-01", "2026-01-02", "2026-01-26", "2026-01-27", "2026-01-28",
     "2026-01-29", "2026-01-30", "2026-01-31", "2026-02-01", "2026-02-02",
@@ -20,6 +22,11 @@ _HOLIDAYS_2026 = {
 }
 
 
+def _normalize_code(raw) -> str:
+    match = re.search(r"(\d{6})", str(raw))
+    return match.group(1) if match else ""
+
+
 class Universe:
     def __init__(self, storage=None):
         self.cfg = get_config()
@@ -27,11 +34,19 @@ class Universe:
         self.market = MarketData()
 
     def is_trading_day(self) -> bool:
-        """判断今天是否交易日（周末 + 节假日）"""
+        """判断今天是否交易日（优先 AKShare 交易日历，失败时用兜底表）"""
         today = date.today()
         if today.weekday() >= 5:  # 周六周日
             return False
-        if today.isoformat() in _HOLIDAYS_2026:
+        today_str = today.isoformat()
+        try:
+            df = ak.tool_trade_date_hist_sina()
+            trade_dates = {str(v)[:10] for v in df["trade_date"].tolist()}
+            if trade_dates and max(trade_dates) >= today_str:
+                return today_str in trade_dates
+        except Exception as e:
+            logger.debug(f"交易日历获取失败，使用本地兜底表: {e}")
+        if today_str in _HOLIDAYS_2026:
             return False
         return True
 
@@ -59,7 +74,7 @@ class Universe:
         return all_codes
 
     def _build_hot_pool(self) -> list[str]:
-        """动态生成热门拓展池（龙虎榜 + 涨幅榜龙头）"""
+        """动态生成热门拓展池（龙虎榜 + 板块涨幅龙头 + 北向净买入）"""
         hot = []
         today_str = date.today().strftime("%Y%m%d")
 
@@ -67,40 +82,47 @@ class Universe:
         try:
             df = ak.stock_lhb_detail_em(start_date=today_str, end_date=today_str)
             for code in df["代码"].unique()[:15]:
-                hot.append(str(code).zfill(6))
+                normalized = _normalize_code(code)
+                if normalized:
+                    hot.append(normalized)
             logger.info(f"龙虎榜: {len(df)} 只上榜")
         except Exception as e:
             logger.warning(f"龙虎榜获取失败: {e}")
 
-        # 涨幅前排龙头（用 stock_sector_fund_flow_rank 的涨跌幅）
+        # 涨幅榜板块前 3 中的龙头股
         try:
             df2 = ak.stock_sector_fund_flow_rank(indicator="今日")
             df2 = df2.sort_values("今日涨跌幅", ascending=False)
-            top_sectors = df2.head(5)["名称"].tolist()
-            logger.info(f"今日强势板块: {top_sectors[:3]}")
-            # 每个板块取龙头股（简化处理，直接用 hot_rank_em）
-            df3 = ak.stock_hot_rank_em()
-            df3 = df3.sort_values("涨跌幅", ascending=False)
-            for _, row in df3.head(15).iterrows():
-                raw = str(row["代码"])
-                code = raw[2:]  # 去掉 SH/SZ 前缀
-                hot.append(code.zfill(6))
+            top_sectors = df2.head(3)["名称"].tolist()
+            logger.info(f"今日强势板块: {top_sectors}")
+            for sector in top_sectors:
+                try:
+                    cons = ak.stock_sector_fund_flow_summary(symbol=sector, indicator="今日")
+                    cons = cons.sort_values("今日涨跌幅", ascending=False)
+                    code = _normalize_code(cons.iloc[0].get("代码", "")) if len(cons) else ""
+                    if code:
+                        hot.append(code)
+                        logger.info(f"板块龙头: {sector} -> {code}")
+                except Exception as sector_error:
+                    logger.debug(f"板块龙头获取失败 {sector}: {sector_error}")
         except Exception as e:
-            logger.warning(f"热门榜获取失败: {e}")
+            logger.warning(f"强势板块龙头获取失败: {e}")
 
-        # 北向（用 stock_hsgt_fund_flow_summary_em 看大盘情绪）
+        # 北向资金净买入 Top10
         try:
-            df4 = ak.stock_hsgt_fund_flow_summary_em()
-            logger.info(f"北向资金今日: {df4.iloc[0] if len(df4)>0 else 'N/A'}")
+            north = self.market.get_north_money()
+            for item in north:
+                hot.append(item["code"])
+            logger.info(f"北向资金净买入Top10: {len(north)} 只")
         except Exception as e:
-            logger.debug(f"北向资金获取失败: {e}")
+            logger.debug(f"北向资金候选获取失败: {e}")
 
         # 去重 + 限制
         seen = set()
         result = []
         for c in hot:
-            c = c.zfill(6)
-            if c not in seen and len(result) < 30:
+            c = _normalize_code(c)
+            if c and c not in seen and len(result) < 30:
                 seen.add(c)
                 result.append(c)
         logger.info(f"热门拓展池: {len(result)} 只")

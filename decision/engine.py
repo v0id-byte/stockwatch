@@ -61,7 +61,7 @@ class DecisionEngine:
         current_price = kline[-1]["close"] if kline else 0
 
         # ---- 涨停/ST/次新：强制 HOLD ----
-        if tech_score > 0.5 and kline and len(kline) >= 2:
+        if kline and len(kline) >= 2:
             pct = (kline[-1]["close"] / kline[-2]["close"] - 1) * 100
             if pct >= 9.5:
                 logger.info(f"{code}({name}) 涨停，强制 HOLD")
@@ -69,6 +69,9 @@ class DecisionEngine:
         if "ST" in name or "*ST" in name or "退" in name:
             logger.info(f"{code}({name}) ST/*ST/退市，强制 HOLD")
             return self._hold_decision(code, name, current_price, "ST/*ST/退市风险")
+        if kline and len(kline) < 60:
+            logger.info(f"{code}({name}) 上市不足60个交易日，强制 HOLD")
+            return self._hold_decision(code, name, current_price, "上市不足60个交易日")
 
         # ---- LLM 决策 ----
         try:

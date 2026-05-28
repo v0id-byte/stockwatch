@@ -1,13 +1,24 @@
 """市场数据获取（腾讯财经接口）"""
 import re, json
 import requests
-from datetime import datetime, timedelta
 from loguru import logger
 
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
     'Referer': 'https://gu.qq.com/'
 }
+
+
+def _normalize_code(raw) -> str:
+    match = re.search(r"(\d{6})", str(raw))
+    return match.group(1) if match else ""
+
+
+def _to_float(value) -> float:
+    try:
+        return float(str(value).replace(",", "").replace("%", ""))
+    except (TypeError, ValueError):
+        return 0.0
 
 
 class MarketData:
@@ -93,29 +104,40 @@ class MarketData:
             return []
 
     @staticmethod
-    def is_trading_day() -> bool:
-        """用内置节日表 + weekday 判断（非交易日返回 False）"""
-        from datetime import date
-        today = date.today()
-        if today.weekday() >= 5:
-            return False
-        # 简化：默认交易日（实际部署时 AKShare 修复后用真实日历）
-        return True
+    def get_index_pct(index_code: str = "sh000001") -> float:
+        """获取指数实时涨跌幅，默认上证指数。"""
+        try:
+            url = f"https://qt.gtimg.cn/q={index_code}"
+            resp = requests.get(url, headers=HEADERS, timeout=10)
+            resp.encoding = 'utf-8'
+            match = re.search(r'="([^"]+)"', resp.text)
+            if not match:
+                return 0.0
+            fields = match.group(1).split('~')
+            if len(fields) > 32:
+                return _to_float(fields[32])
+        except Exception as e:
+            logger.warning(f"指数行情获取失败 {index_code}: {e}")
+        return 0.0
 
     @staticmethod
     def get_north_money() -> list[dict]:
-        """北向资金 Top10（用 stock_hsgt_stock_statistics_em）"""
+        """北向资金净买入 Top10。"""
         try:
             import akshare as ak
-            df = ak.stock_hsgt_stock_statistics_em(symbol='北向', end_date=datetime.now().strftime('%Y%m%d'))
+            df = ak.stock_hsgt_hold_stock_em(market="北向", indicator="今日排行")
             if len(df) == 0:
                 return []
+            net_col = next((c for c in df.columns if "增持估计-市值" in str(c)), "")
+            if net_col:
+                df = df.sort_values(net_col, ascending=False)
             top = df.head(10)
             return [
-                {"code": str(row.get("代码", "")).zfill(6),
+                {"code": _normalize_code(row.get("代码", "")),
                  "name": str(row.get("名称", "")),
-                 "net_buy": float(row.get("当日成交净买额", 0))}
+                 "net_buy": _to_float(row.get(net_col, 0) if net_col else 0)}
                 for _, row in top.iterrows()
+                if _normalize_code(row.get("代码", ""))
             ]
         except Exception as e:
             logger.warning(f"北向资金获取失败: {e}")

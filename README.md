@@ -9,7 +9,7 @@
 ### 1. 配置凭证
 
 ```bash
-nano ~/.stockwatch/.env
+nano ~/stockwatch/.env
 ```
 
 必填项：

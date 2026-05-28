@@ -1,7 +1,7 @@
 """SQLite 持久化层"""
 import json
 import sqlite3
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from pathlib import Path
 from typing import Any, Optional
 from loguru import logger
@@ -92,8 +92,7 @@ class Storage:
             """, [{"code": code, **item} for item in items])
 
     def get_news_since(self, code: str, days: int = 7) -> list[dict]:
-        from datetime import datetime as dt
-        cutoff = (dt.now().replace(hour=0, minute=0, second=0) - dt.timedelta(days=days)).strftime("%Y-%m-%d")
+        cutoff = (datetime.now().replace(hour=0, minute=0, second=0) - timedelta(days=days)).strftime("%Y-%m-%d")
         with self._conn() as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(

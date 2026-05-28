@@ -42,7 +42,11 @@ fi
 echo "[6/6] 安装 systemd 服务..."
 SERVICE_FILE="$WORKDIR/scripts/stockwatch.service"
 if [ -f "$SERVICE_FILE" ]; then
-    sudo cp "$SERVICE_FILE" /etc/systemd/system/stockwatch.service
+    ACTUAL_USER="$(whoami)"
+    SERVICE_TMP="$(mktemp)"
+    sed "s|__STOCKWATCH_HOME__|$HOME|g; s|__STOCKWATCH_USER__|$ACTUAL_USER|g" "$SERVICE_FILE" > "$SERVICE_TMP"
+    sudo cp "$SERVICE_TMP" /etc/systemd/system/stockwatch.service
+    rm -f "$SERVICE_TMP"
     sudo systemctl daemon-reload
     sudo systemctl enable stockwatch
     echo "  systemd 服务已 enable"

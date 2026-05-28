@@ -5,15 +5,15 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=rpi
-WorkingDirectory=/home/rpi/stockwatch
-Environment="PATH=/home/rpi/stockwatch/.venv/bin"
-Environment="PYTHONPATH=/home/rpi/stockwatch"
-ExecStart=/home/rpi/stockwatch/.venv/bin/python /home/rpi/stockwatch/main.py daemon
+User=__STOCKWATCH_USER__
+WorkingDirectory=__STOCKWATCH_HOME__/stockwatch
+Environment="PATH=__STOCKWATCH_HOME__/stockwatch/.venv/bin"
+Environment="PYTHONPATH=__STOCKWATCH_HOME__/stockwatch"
+ExecStart=__STOCKWATCH_HOME__/stockwatch/.venv/bin/python __STOCKWATCH_HOME__/stockwatch/main.py daemon
 Restart=on-failure
 RestartSec=30
-StandardOutput=append:/home/rpi/.stockwatch/logs/daemon.log
-StandardError=append:/home/rpi/.stockwatch/logs/daemon.log
+StandardOutput=append:__STOCKWATCH_HOME__/.stockwatch/logs/daemon.log
+StandardError=append:__STOCKWATCH_HOME__/.stockwatch/logs/daemon.log
 
 [Install]
 WantedBy=multi-user.target

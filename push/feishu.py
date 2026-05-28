@@ -56,26 +56,34 @@ class FeishuClient:
     def send_message(self, content: dict) -> bool:
         """发送卡片消息，content 是卡片 JSON"""
         url = f"{self.BASE_URL}/im/v1/messages?receive_id_type={self.cfg.feishu_receive_id_type}"
-        payload = {
-            "receive_id": self.cfg.feishu_receive_id,
-            "msg_type": "interactive",
-            "content": json.dumps(content, ensure_ascii=False),
-        }
-        headers = {
-            "Authorization": f"Bearer {self._get_token()}",
-            "Content-Type": "application/json",
-        }
         import urllib.request
-        body = json.dumps(payload).encode()
-        req = urllib.request.Request(url, data=body, headers=headers)
-        try:
+
+        def _send_once() -> dict:
+            payload = {
+                "receive_id": self.cfg.feishu_receive_id,
+                "msg_type": "interactive",
+                "content": json.dumps(content, ensure_ascii=False),
+            }
+            headers = {
+                "Authorization": f"Bearer {self._get_token()}",
+                "Content-Type": "application/json",
+            }
+            body = json.dumps(payload).encode()
+            req = urllib.request.Request(url, data=body, headers=headers)
             with urllib.request.urlopen(req, timeout=20) as r:
-                result = json.loads(r.read())
-                if result.get("code") == 0:
-                    logger.info("飞书消息发送成功")
-                    return True
-                logger.warning(f"飞书发送失败 code={result.get('code')}: {result.get('msg')}")
-                return False
+                return json.loads(r.read())
+
+        try:
+            result = _send_once()
+            if result.get("code") == 99991663:
+                logger.info("飞书 token 失效，刷新后重试")
+                self._token = None
+                result = _send_once()
+            if result.get("code") == 0:
+                logger.info("飞书消息发送成功")
+                return True
+            logger.warning(f"飞书发送失败 code={result.get('code')}: {result.get('msg')}")
+            return False
         except Exception as e:
             logger.error(f"飞书发送异常: {e}")
             return False
@@ -111,11 +119,7 @@ def render_card(run_id: str, decisions: list[dict]) -> dict:
     def add_signal_group(title_emoji: str, title: str, items: list):
         if not items:
             return
-        # 分隔线：普通文本行
-        elements.append({
-            "tag": "div",
-            "text": {"tag": "plain_text", "content": "─────────────────────"}
-        })
+        elements.append({"tag": "hr"})
         elements.append({
             "tag": "div",
             "text": {"tag": "lark_md", "content": f"**{title_emoji} {title}**"}
@@ -144,10 +148,7 @@ def render_card(run_id: str, decisions: list[dict]) -> dict:
 
     # 卡片尾
     run_time = datetime.now().strftime("%Y-%m-%d %H:%M")
-    elements.append({
-        "tag": "div",
-        "text": {"tag": "plain_text", "content": "─────────────────────"}
-    })
+    elements.append({"tag": "hr"})
     elements.append({
         "tag": "div",
         "text": {

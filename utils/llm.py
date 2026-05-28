@@ -1,11 +1,38 @@
 """MiniMax LLM 客户端（OpenAI 兼容，重试 + JSON 解析）"""
 import json
 import re
+import threading
+
 import tenacity
 from openai import OpenAI
 from loguru import logger
 
 from config import get_config
+
+
+_TOKEN_LOCK = threading.Lock()
+_TOKEN_USAGE_TOTAL = 0
+
+
+def _record_token_usage(response):
+    global _TOKEN_USAGE_TOTAL
+    usage = getattr(response, "usage", None)
+    total = getattr(usage, "total_tokens", 0) if usage else 0
+    if not total:
+        return
+    with _TOKEN_LOCK:
+        _TOKEN_USAGE_TOTAL += int(total)
+
+
+def reset_token_usage():
+    global _TOKEN_USAGE_TOTAL
+    with _TOKEN_LOCK:
+        _TOKEN_USAGE_TOTAL = 0
+
+
+def get_token_usage() -> int:
+    with _TOKEN_LOCK:
+        return _TOKEN_USAGE_TOTAL
 
 
 class MiniMaxClient:
@@ -31,6 +58,7 @@ class MiniMaxClient:
             temperature=temperature,
             max_tokens=max_tokens,
         )
+        _record_token_usage(response)
         return response.choices[0].message.content
 
     def chat_json(self, messages: list[dict]) -> dict:
