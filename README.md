@@ -6,6 +6,9 @@
 [![LightGBM](https://img.shields.io/badge/LightGBM-ranking-00A35C)](https://github.com/microsoft/LightGBM)
 [![AKShare](https://img.shields.io/badge/Data-AKShare-blue)](https://github.com/akfamily/akshare)
 [![Feishu](https://img.shields.io/badge/Bot-Feishu%2FLark-00D6B9)](https://github.com/larksuite/oapi-sdk-python)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+中文 | [English](#english)
 
 **关键词**：A股量化、股票盯盘、股票机器人、飞书机器人、A股新闻分析、股票公告解读、LightGBM 排序模型、Alpha158 因子、AKShare、树莓派部署。
 
@@ -227,9 +230,111 @@ StockWatch 站在这些开源项目之上。以下列出直接依赖或训练/�
 - 本项目不会重新分发第三方行情、公告、新闻或研报原文；运行时数据获取应遵守对应平台的服务条款、robots/接口限制和适用法律法规。
 - 模型分析可能存在延迟、缺失、误判或源数据错误，不应作为自动交易或唯一投资依据。
 
+## 许可证
+
+本项目采用 [MIT License](LICENSE)。MIT 对个人工具、研究项目和二次开发比较友好：允许使用、复制、修改、分发和商用，但需要保留版权与许可证声明，并且软件按“原样”提供、不提供担保。
+
+公开仓库前建议确认：
+
+- `.env`、数据库、模型文件、日志和本地凭证没有被提交。
+- 第三方数据和服务只在运行时调用，不在仓库中重新分发原始行情、公告、新闻或研报。
+- README 中保留投资风险、数据服务和开源引用说明。
+
 ## 免责声明
 
 本项目仅用于个人学习、量化研究和家庭辅助提醒。股票市场有风险，任何模型、因子、新闻摘要或 LLM 回复都可能出错。使用者应自行核验公告、财报、交易所披露和券商/交易系统信息，并自行承担投资决策后果。
+
+---
+
+## English
+
+### StockWatch — A-share stock watchlist and research assistant
+
+StockWatch is a lightweight personal stock monitoring system for China A-share research. It fetches market data, news, announcements, research reports, fund-flow signals and financial snapshots, then combines rule-based analysis, technical indicators, Alpha-style factors, a LightGBM ranking model and an LLM to produce readable Feishu/Lark messages.
+
+The output is designed for non-technical users: a directional view, risk reminders and observation price levels, instead of raw quantitative jargon.
+
+> For learning, research and personal household reminders only. Nothing in this project is investment advice.
+
+### Highlights
+
+- Scheduled A-share watchlist analysis before market open, at noon and after close.
+- Feishu/Lark bot commands for stock lookup, position tracking, buy-price alerts and natural-language stock questions.
+- Research-style replies for questions such as "How is 600449 doing this week?" or "What is the restructuring status of Ningxia Building Materials?".
+- Source-aware context from company announcements, exchange-style disclosures, news, research reports, fund flow, financial data and market attention.
+- Alpha158/Alpha300-style pandas factors covering momentum, volatility, beta, liquidity shock, relative strength, drawdown and volume structure.
+- Optional LightGBM LambdaRank model trained offline and used online as an auxiliary signal.
+- Raspberry Pi friendly deployment with systemd and SQLite.
+
+### Quick Start
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+```
+
+Edit `.env` with your MiniMax and Feishu/Lark credentials, then run:
+
+```bash
+python main.py test
+python main.py once
+python main.py bot
+```
+
+For systemd deployment, see `scripts/install.sh`, `scripts/stockwatch.service` and `scripts/stockwatch-bot.service`.
+
+### Bot Examples
+
+```text
+600519
+600449 最近一周走势如何
+宁夏建材重组怎么样
+买入 600519 1680 100股
+盯买 600519 1500
+取消盯价 600519
+卖出 600519
+```
+
+### Data, Model and Services
+
+- Market and research data are fetched at runtime mainly through AKShare-wrapped public endpoints, Tencent Finance-style quote endpoints, CNINFO-style announcements and Eastmoney-style public pages.
+- Third-party market data, announcements, news and research reports are not redistributed in this repository.
+- The LightGBM model is trained offline with historical A-share data and is only used as an auxiliary ranking signal.
+- LLM output may be delayed, incomplete or wrong. Users should verify exchange disclosures, company filings and brokerage/trading system data independently.
+
+### Open Source Attribution
+
+This project directly depends on or conceptually references the following open-source projects:
+
+| Project | Usage | License |
+| --- | --- | --- |
+| [Microsoft Qlib](https://github.com/microsoft/qlib) | Conceptual reference for Alpha158 naming and quantitative research workflow; StockWatch uses an independent pandas implementation | MIT |
+| [AKShare](https://github.com/akfamily/akshare) | A-share market data, news, announcements, fund flow, sectors and financial data | MIT |
+| [LightGBM](https://github.com/microsoft/LightGBM) | LambdaRank model training and inference | MIT |
+| [pandas](https://github.com/pandas-dev/pandas) | DataFrames, time series and training set construction | BSD-3-Clause |
+| [NumPy](https://github.com/numpy/numpy) | Numerical computation and factor calculation | BSD-3-Clause |
+| [scikit-learn](https://github.com/scikit-learn/scikit-learn) | Model evaluation metrics such as NDCG | BSD-3-Clause |
+| [Apache Arrow / pyarrow](https://github.com/apache/arrow) | Parquet training data IO | Apache-2.0 |
+| [OpenAI Python SDK](https://github.com/openai/openai-python) | OpenAI-compatible client, currently used with MiniMax API | Apache-2.0 |
+| [Lark/Feishu OpenAPI Python SDK](https://github.com/larksuite/oapi-sdk-python) | Feishu/Lark bot and OpenAPI integration | MIT |
+| [Requests](https://github.com/psf/requests) | HTTP requests | Apache-2.0 |
+| [urllib3](https://github.com/urllib3/urllib3) | HTTP connection pooling | MIT |
+| [Loguru](https://github.com/Delgan/loguru) | Logging | MIT |
+| [Tenacity](https://github.com/jd/tenacity) | Retry logic for LLM/API calls | Apache-2.0 |
+| [python-dotenv](https://github.com/theskumar/python-dotenv) | `.env` configuration loading | BSD-3-Clause |
+| [tqdm](https://github.com/tqdm/tqdm) | Training/download progress bars | MPL-2.0 / MIT |
+
+StockWatch is not affiliated with, endorsed by or commercially partnered with the maintainers or providers listed above.
+
+### License
+
+StockWatch is released under the [MIT License](LICENSE). MIT is a practical choice for this repository because it is permissive, easy to understand, compatible with the major dependencies used here and suitable for personal tools, research prototypes and community forks.
+
+### Disclaimer
+
+This project is for personal learning, quantitative research and household reminders only. Stock markets are risky. Models, factors, news summaries and LLM responses can be wrong. Users are responsible for verifying primary sources and making their own investment decisions.
 
 ---
 
