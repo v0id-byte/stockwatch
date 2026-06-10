@@ -3,6 +3,7 @@ import sys
 import os
 import time
 import uuid
+import hashlib
 from datetime import datetime, timedelta
 
 # 确保从 stockwatch 目录运行
@@ -13,11 +14,12 @@ from config import get_config
 from utils.storage import Storage
 from utils.llm import get_llm_client, get_token_usage, reset_token_usage
 from data.market import MarketData
+from data.news import NewsData
 from data.universe import Universe
 from analysis.technical import compute_tech_score
-from analysis.sentiment import batch_sentiment
+from analysis.sentiment import batch_sentiment_details, score_news_items
 from decision.engine import DecisionEngine
-from push.feishu import FeishuClient, render_card
+from push.feishu import FeishuClient, render_card, render_text_card
 
 
 def _setup_log():
@@ -59,6 +61,154 @@ def _tracked_alert_reason(position: dict, decision: dict) -> str:
     if decision.get("action") == "SELL" and decision.get("confidence", 0) >= 0.6:
         return "持仓跟踪：模型转为 SELL，建议复核仓位"
     return ""
+
+
+def _is_intraday_monitor_time(now: datetime | None = None) -> bool:
+    now = now or datetime.now()
+    if now.weekday() >= 5:
+        return False
+    minutes = now.hour * 60 + now.minute
+    return (9 * 60 + 25 <= minutes <= 11 * 60 + 30) or (13 * 60 <= minutes <= 15 * 60)
+
+
+def _send_alert_card(feishu: FeishuClient, chat_id: str, card: dict) -> bool:
+    if chat_id:
+        return feishu.send_card_to(chat_id, card, "chat_id")
+    return feishu.send_message(card)
+
+
+def _sell_pressure(quote: dict) -> tuple[bool, str]:
+    buy_volume = float(quote.get("buy_volume_5") or 0)
+    sell_volume = float(quote.get("sell_volume_5") or 0)
+    outer_volume = float(quote.get("outer_volume") or 0)
+    inner_volume = float(quote.get("inner_volume") or 0)
+    pct = float(quote.get("pct_change") or 0)
+    book_ratio = sell_volume / buy_volume if buy_volume > 0 else 0
+    trade_ratio = inner_volume / outer_volume if outer_volume > 0 else 0
+    heavy = (book_ratio >= 1.8 and sell_volume > 0) or (trade_ratio >= 1.5 and pct <= -0.5)
+
+    parts = []
+    if book_ratio > 0:
+        parts.append(f"五档卖/买量 {book_ratio:.1f}倍")
+    if trade_ratio > 0:
+        parts.append(f"内/外盘 {trade_ratio:.1f}倍")
+    parts.append(f"今日涨跌 {pct:+.2f}%")
+    return heavy, "，".join(parts)
+
+
+def _news_event_key(code: str, item: dict) -> str:
+    raw = f"{code}|{item.get('ts', '')}|{item.get('title', '')}"
+    return "news:" + hashlib.md5(raw.encode()).hexdigest()
+
+
+def _major_news_by_title(title: str) -> bool:
+    keywords = [
+        "停牌", "复牌", "立案", "处罚", "减持", "增持", "回购", "重组",
+        "并购", "收购", "重大合同", "中标", "业绩预告", "亏损", "暴雷",
+        "退市", "风险警示", "澄清", "事故", "制裁",
+    ]
+    return any(word in str(title or "") for word in keywords)
+
+
+def _monitor_price_alerts(storage: Storage, market: MarketData, feishu: FeishuClient):
+    alerts = storage.get_active_price_alerts()
+    if not alerts:
+        return
+    codes = sorted({alert["code"] for alert in alerts})
+    quotes = market.get_realtime_quote(codes)
+    today = datetime.now().date().isoformat()
+
+    for alert in alerts:
+        if str(alert.get("last_notified_at") or "").startswith(today):
+            continue
+        quote = quotes.get(alert["code"], {})
+        current_price = float(quote.get("close") or 0)
+        trigger_price = float(alert.get("trigger_price") or 0)
+        if current_price <= 0 or trigger_price <= 0 or current_price > trigger_price:
+            continue
+
+        heavy_pressure, pressure_text = _sell_pressure(quote)
+        title = "触发加仓价，但卖压偏重" if heavy_pressure else "触发加仓价"
+        template = "orange" if heavy_pressure else "green"
+        action_line = "建议先别急着加，已挂买单可考虑撤单观察。" if heavy_pressure else "卖压未明显放大，可按计划关注加仓。"
+        lines = [
+            f"**{alert.get('name', alert['code'])}**({alert['code']}) 跌到 {current_price:.2f}元",
+            f"盯价：{trigger_price:.2f}元",
+            f"盘口：{pressure_text}",
+            f"建议：{action_line}",
+        ]
+        if alert.get("quantity"):
+            lines.insert(2, f"计划数量：{float(alert['quantity']):g}股")
+        card = render_text_card(title, lines, template=template)
+        if _send_alert_card(feishu, alert.get("chat_id", ""), card):
+            storage.mark_price_alert_notified(alert["id"])
+
+
+def _monitor_major_news(storage: Storage, market: MarketData, feishu: FeishuClient):
+    cfg = get_config()
+    alerts = storage.get_active_price_alerts()
+    positions = storage.get_active_tracked_positions()
+    codes = []
+    for code in cfg.watchlist:
+        codes.append(code)
+    for row in [*alerts, *positions]:
+        codes.append(row["code"])
+    codes = list(dict.fromkeys(codes))[:30]
+    if not codes:
+        return
+
+    quotes = market.get_realtime_quote(codes)
+    for code in codes:
+        name = quotes.get(code, {}).get("name", code)
+        try:
+            news = NewsData.get_news(code, days=1)[:8]
+        except Exception as e:
+            logger.warning(f"重大新闻扫描失败 {code}: {e}")
+            continue
+        if not news:
+            continue
+        storage.upsert_news(code, news)
+        fresh_news = [item for item in news if not storage.alert_event_exists(_news_event_key(code, item))]
+        if not fresh_news:
+            continue
+        batch = fresh_news[:5]
+        try:
+            scores = score_news_items(batch)
+        except Exception as e:
+            logger.warning(f"重大新闻打分失败 {code}: {e}")
+            continue
+        if len(scores) < len(batch):
+            scores.extend([0.0] * (len(batch) - len(scores)))
+
+        for item, score in zip(batch, scores):
+            key = _news_event_key(code, item)
+            title = str(item.get("title", ""))
+            storage.update_news_sentiment(code, title, item.get("ts", ""), score)
+            is_major = abs(score) >= 0.8 or _major_news_by_title(title)
+            if not is_major:
+                storage.mark_alert_event(key, "news_seen", code, title)
+                continue
+
+            direction = "正面" if score > 0.08 else "负面" if score < -0.08 else "中性"
+            template = "red" if score < -0.08 else "green" if score > 0.08 else "blue"
+            card = render_text_card("个股重大消息提醒", [
+                f"**{name}**({code}) {direction}消息 {score:+.2f}",
+                f"来源：{item.get('source', '未知')}",
+                f"标题：{title}",
+                f"时间：{item.get('ts', '')}",
+            ], template=template)
+            if feishu.send_message(card):
+                storage.mark_alert_event(key, "major_news", code, title)
+
+
+def monitor_once(check_news: bool = False):
+    """盘中轻量监控：盯加仓价 + 可选重大新闻扫描。"""
+    storage = Storage()
+    market = MarketData()
+    feishu = FeishuClient()
+    _monitor_price_alerts(storage, market, feishu)
+    if check_news:
+        _monitor_major_news(storage, market, feishu)
 
 
 def test():
@@ -149,10 +299,11 @@ def once():
     # 1. 构建分析池
     codes = universe.get_today_codes()
     tracked_positions = storage.get_active_tracked_positions()
+    price_alerts = storage.get_active_price_alerts()
     tracked_by_code = {pos["code"]: pos for pos in tracked_positions}
-    for pos in tracked_positions:
-        if pos["code"] not in codes:
-            codes.append(pos["code"])
+    for row in [*tracked_positions, *price_alerts]:
+        if row["code"] not in codes:
+            codes.append(row["code"])
     logger.info(f"分析池: {len(codes)} 只")
     if not codes:
         logger.info("分析池为空，结束")
@@ -224,10 +375,11 @@ def once():
         logger.debug(f"{code} 技术分: {tech_score} {tech_result.get('details', {})}")
 
         # 4. 情绪分（并发）
-        # 这里先记录，等待 batch_sentiment
+        # 这里先记录，等待 batch_sentiment_details
         decisions.append({
             "code": code, "name": name,
             "tech_score": tech_score,
+            "tech_details": tech_result.get("details", {}),
             "kline": kline,
             "quote": quotes.get(code, {}),
         })
@@ -259,9 +411,11 @@ def once():
 
     # 并发情绪分析（最多30只，减少 token 消耗）
     batch = [(d["code"], d["name"]) for d in decisions[:30]]
-    sentiments = batch_sentiment(batch, storage=storage)
+    sentiment_details = batch_sentiment_details(batch, storage=storage)
     for d in decisions:
-        d["sentiment"] = sentiments.get(d["code"], 0.0)
+        detail = sentiment_details.get(d["code"], {})
+        d["sentiment"] = detail.get("score", 0.0)
+        d["sentiment_context"] = detail.get("context", "")
 
     # 5. 最终决策
     engine = DecisionEngine(storage)
@@ -272,6 +426,8 @@ def once():
             d["code"], d["name"],
             d["tech_score"], d["sentiment"],
             d["kline"],
+            tech_details=d.get("tech_details"),
+            sentiment_context=d.get("sentiment_context", ""),
             north_context=north_context,
             sht_pct=sht_pct,
             alpha_summary=alpha_contexts.get(d["code"], ""),
@@ -333,16 +489,28 @@ def daemon():
     logger.info("StockWatch 守护进程启动")
 
     scheduler = sched.scheduler(time.time, time.sleep)
+    last_news_check = {"at": datetime.min}
 
-    def _run():
+    def _run_full():
         try:
             once()
         except Exception as e:
             logger.error(f"运行异常: {e}")
-        # 调度下次
-        _schedule_next(scheduler)
+        _schedule_next_full(scheduler)
 
-    def _schedule_next(sched_obj):
+    def _run_monitor():
+        try:
+            now = datetime.now()
+            if _is_intraday_monitor_time(now):
+                check_news = (now - last_news_check["at"]).total_seconds() >= 1800
+                monitor_once(check_news=check_news)
+                if check_news:
+                    last_news_check["at"] = now
+        except Exception as e:
+            logger.error(f"盘中监控异常: {e}")
+        _schedule_next_monitor(scheduler)
+
+    def _schedule_next_full(sched_obj):
         now = datetime.now()
         targets = [
             (9, 10),   # 早盘
@@ -358,10 +526,14 @@ def daemon():
 
         next_run = min(candidates)
         delay = (next_run - now).total_seconds()
-        logger.info(f"下次运行: {next_run.strftime('%Y-%m-%d %H:%M')}, 约 {int(delay//60)} 分钟后")
-        sched_obj.enter(delay, 1, _run, ())
+        logger.info(f"下次完整分析: {next_run.strftime('%Y-%m-%d %H:%M')}, 约 {int(delay//60)} 分钟后")
+        sched_obj.enter(delay, 1, _run_full, ())
 
-    _schedule_next(scheduler)
+    def _schedule_next_monitor(sched_obj):
+        sched_obj.enter(300, 2, _run_monitor, ())
+
+    _schedule_next_full(scheduler)
+    scheduler.enter(10, 2, _run_monitor, ())
     scheduler.run()
 
 
@@ -377,6 +549,9 @@ if __name__ == "__main__":
         once()
     elif mode == "daemon":
         daemon()
+    elif mode == "monitor":
+        _setup_log()
+        monitor_once(check_news=True)
     elif mode == "bot":
         _setup_log()
         from bot.runner import run_bot

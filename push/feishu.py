@@ -110,6 +110,68 @@ def _format_price(value) -> str:
     return f"{price:.2f}元" if price > 0 else "—"
 
 
+def _format_score(value) -> str:
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        score = 0.0
+    return f"{score:+.2f}"
+
+
+def _compact_line(value: str) -> str:
+    lines = [line.strip(" -") for line in str(value or "").splitlines() if line.strip()]
+    return "；".join(lines)
+
+
+def _json_items(value: str, limit: int) -> list[str]:
+    try:
+        items = json.loads(value or "[]")
+    except json.JSONDecodeError:
+        items = []
+    return [str(item) for item in items[:limit]]
+
+
+def _advice_line(d: dict) -> str:
+    action = d.get("action", "HOLD")
+    if action == "BUY":
+        return (
+            f"建议：按参考买入价 {_format_price(d.get('trade_price'))} 观察，"
+            f"跌破 {_format_price(d.get('stop_loss'))} 止损"
+        )
+    if action == "SELL":
+        return f"建议：按参考卖出价 {_format_price(d.get('trade_price'))} 减仓或离场"
+    return "建议：暂不操作，继续观察"
+
+
+def _analysis_lines(d: dict) -> list[str]:
+    lines = []
+    if "tech_score" in d:
+        lines.append(
+            f"技术面 {_format_score(d.get('tech_score'))}/1："
+            f"{d.get('tech_summary') or '暂无细节'}"
+        )
+    if "sentiment_score" in d:
+        lines.append(
+            f"消息面指数 {_format_score(d.get('sentiment_score'))}/1："
+            f"{d.get('sentiment_summary') or '中性'}"
+        )
+    sentiment_context = _compact_line(d.get("sentiment_context", ""))
+    if sentiment_context:
+        lines.append(sentiment_context)
+    alpha = _compact_line(d.get("alpha_summary", ""))
+    if alpha:
+        lines.append(alpha)
+    lgbm = _compact_line(d.get("lgbm_context", ""))
+    if lgbm:
+        lines.append(lgbm)
+    return lines
+
+
+def _reason_line(d: dict) -> str:
+    reasons = _json_items(d.get("reasons_json"), 2)
+    return "为什么：" + "；".join(reasons) if reasons else ""
+
+
 def _position_lines(d: dict) -> list[str]:
     action = d.get("action", "HOLD")
     if action == "BUY":
@@ -161,7 +223,9 @@ def render_single_decision_card(decision: dict, title: str = "股票即时分析
     lines = [
         f"**{decision.get('name', decision.get('code'))}**({decision.get('code')}) {action}",
         f"置信度 {conf:.0%}{raw_text}",
+        _advice_line(decision),
         *_position_lines(decision),
+        *_analysis_lines(decision),
     ]
     if extra_lines:
         lines.extend(extra_lines)
@@ -231,17 +295,23 @@ def render_card(run_id: str, decisions: list[dict], regime_info: dict | None = N
             raw_conf = d.get("raw_confidence")
             stars = "⭐" * max(1, min(5, int(conf * 5)))
             raw_str = f" 原始 {raw_conf:.0%}" if raw_conf is not None and abs(raw_conf - conf) > 0.005 else ""
-            position_text = "\n".join(_position_lines(d))
-            position_text = f"\n{position_text}" if position_text else ""
+            body_lines = [
+                f"**{d['name']}**({d['code']}) {action}",
+                f"{stars} 校准置信度 {conf:.0%}{raw_str}",
+                _advice_line(d),
+            ]
+            body_lines.extend(_position_lines(d))
+            body_lines.extend(_analysis_lines(d))
+            reason_text = _reason_line(d)
+            if reason_text:
+                body_lines.append(reason_text)
+            if d.get("one_liner"):
+                body_lines.append(f"📝 {d.get('one_liner', '—')}")
             elements.append({
                 "tag": "div",
                 "text": {
                     "tag": "lark_md",
-                    "content": (
-                        f"**{d['name']}**({d['code']}) {action}\n"
-                        f"{stars} 校准置信度 {conf:.0%}{raw_str}{position_text}\n"
-                        f"📝 {d.get('one_liner', '—')}"
-                    )
+                    "content": "\n".join(body_lines)
                 }
             })
 

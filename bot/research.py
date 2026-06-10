@@ -24,6 +24,16 @@ from utils.storage import Storage
 
 _CODE_RE = re.compile(r"(?<!\d)(\d{6})(?!\d)")
 _REORG_WORDS = ("重组", "并购", "吸收合并", "资产注入", "资产出售", "停牌", "复牌", "定增")
+_FINANCE_FIELDS = {
+    "REPORT_DATE_NAME": "报告期",
+    "EPSJB": "每股收益",
+    "BPS": "每股净资产",
+    "TOTALOPERATEREVETZ": "营收同比",
+    "PARENTNETPROFITTZ": "归母净利同比",
+    "ROEJQ": "净资产收益率",
+    "XSMLL": "销售毛利率",
+    "ZCFZL": "资产负债率",
+}
 
 
 @dataclass
@@ -48,6 +58,26 @@ def _display_text(value, limit: int = 120) -> str:
     text = re.sub(r"<[^>]+>", "", str(value or ""))
     text = " ".join(text.split())
     return text[:limit]
+
+
+def _safe_float(value) -> float | None:
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return None
+    return num if math.isfinite(num) else None
+
+
+def _market_prefix(code: str) -> str:
+    if code.startswith(("6", "5")):
+        return "sh"
+    if code.startswith(("8", "4")):
+        return "bj"
+    return "sz"
+
+
+def _market_secid(code: str) -> str:
+    return f"{code}.SH" if code.startswith(("6", "5")) else f"{code}.BJ" if code.startswith(("8", "4")) else f"{code}.SZ"
 
 
 def _date_yyyymmdd(days_ago: int = 0) -> str:
@@ -186,6 +216,109 @@ def get_recent_news(code: str, days: int = 14) -> list[dict]:
     return items
 
 
+def get_research_reports(code: str) -> list[dict]:
+    reports = []
+    try:
+        df = _ak_call(ak.stock_research_report_em, symbol=code)
+    except Exception as e:
+        logger.debug(f"研报获取失败 {code}: {e}")
+        return reports
+    for _, row in df.head(4).iterrows():
+        reports.append({
+            "source": "东方财富研报",
+            "date": _display_text(row.get("日期", "")),
+            "title": _display_text(row.get("报告名称", ""), 160),
+            "institution": _display_text(row.get("机构", ""), 40),
+            "rating": _display_text(row.get("东财评级", ""), 20),
+        })
+    return reports
+
+
+def get_fund_flow_summary(code: str) -> dict:
+    try:
+        df = _ak_call(ak.stock_individual_fund_flow, stock=code, market=_market_prefix(code))
+    except Exception as e:
+        logger.debug(f"资金流获取失败 {code}: {e}")
+        return {}
+    if df.empty:
+        return {}
+    latest = df.iloc[-1]
+    recent = df.tail(5)
+    mid = df.tail(20)
+    latest_net = _safe_float(latest.get("主力净流入-净额")) or 0.0
+    latest_ratio = _safe_float(latest.get("主力净流入-净占比")) or 0.0
+    recent_net = float(recent["主力净流入-净额"].apply(lambda value: _safe_float(value) or 0.0).sum())
+    mid_net = float(mid["主力净流入-净额"].apply(lambda value: _safe_float(value) or 0.0).sum())
+    return {
+        "source": "东方财富资金流",
+        "date": _display_text(latest.get("日期", "")),
+        "latest_main_net_yuan": round(latest_net, 2),
+        "latest_main_net_ratio": round(latest_ratio, 2),
+        "main_net_5d_yuan": round(recent_net, 2),
+        "main_net_20d_yuan": round(mid_net, 2),
+    }
+
+
+@lru_cache(maxsize=1)
+def _stock_comment_table():
+    return _ak_call(ak.stock_comment_em)
+
+
+def get_market_attention(code: str) -> dict:
+    out = {}
+    try:
+        df = _stock_comment_table()
+        row = df[df["代码"].astype(str).str.zfill(6) == code].head(1)
+        if not row.empty:
+            item = row.iloc[0]
+            out["comment"] = {
+                "source": "东方财富千股千评",
+                "date": _display_text(item.get("交易日", "")),
+                "score": _safe_float(item.get("综合得分")),
+                "rank": _safe_float(item.get("目前排名")),
+                "focus": _safe_float(item.get("关注指数")),
+                "institution_participation": _safe_float(item.get("机构参与度")),
+            }
+    except Exception as e:
+        logger.debug(f"千股千评获取失败 {code}: {e}")
+
+    try:
+        hot = _ak_call(ak.stock_hot_rank_em)
+        normalized = hot["代码"].astype(str).str.extract(r"(\d{6})", expand=False)
+        row = hot[normalized == code].head(1)
+        if not row.empty:
+            item = row.iloc[0]
+            out["hot_rank"] = {
+                "source": "东方财富人气榜",
+                "rank": _safe_float(item.get("当前排名")),
+                "price": _safe_float(item.get("最新价")),
+                "pct_change": _safe_float(item.get("涨跌幅")),
+            }
+    except Exception as e:
+        logger.debug(f"人气榜获取失败 {code}: {e}")
+    return out
+
+
+def get_financial_snapshot(code: str) -> dict:
+    try:
+        df = _ak_call(ak.stock_financial_analysis_indicator_em, symbol=_market_secid(code))
+    except Exception as e:
+        logger.debug(f"财务指标获取失败 {code}: {e}")
+        return {}
+    if df.empty:
+        return {}
+    row = df.iloc[0]
+    metrics = {}
+    for key, label in _FINANCE_FIELDS.items():
+        value = row.get(key)
+        num = _safe_float(value)
+        metrics[label] = round(num, 2) if num is not None else _display_text(value, 40)
+    return {
+        "source": "东方财富财务分析",
+        "metrics": metrics,
+    }
+
+
 def _ensure_kline(code: str, market: MarketData, storage: Storage) -> list[dict]:
     if not storage.kline_cached_today(code):
         for row in market.get_daily_kline(code):
@@ -221,6 +354,15 @@ def build_trend_summary(kline: list[dict], quote: dict) -> dict:
     support = min(float(row["low"]) for row in kline[-10:])
     resistance = max(float(row["high"]) for row in kline[-10:])
 
+    def period_return(days: int) -> float | None:
+        if len(kline) <= days:
+            return None
+        base = float(kline[-days - 1]["close"])
+        return (last_close / base - 1) * 100 if base > 0 else None
+
+    peak_120 = max(float(row["high"]) for row in kline[-120:]) if len(kline) >= 120 else max(highs)
+    drawdown_120 = (last_close / peak_120 - 1) * 100 if peak_120 > 0 else 0.0
+
     return {
         "summary": (
             f"最近5个交易日从 {first_close:.2f} 到 {last_close:.2f}，累计 {_pct(week_pct)}；"
@@ -228,6 +370,13 @@ def build_trend_summary(kline: list[dict], quote: dict) -> dict:
             f"当前参考价 {latest:.2f}，今日涨跌 {_pct(latest_pct)}；"
             f"近5日均量较前5日 {'放大' if vol_ratio >= 1.15 else '缩小' if vol_ratio <= 0.85 else '基本持平'}。"
         ),
+        "quote_time": quote.get("quote_time", ""),
+        "medium_long_term": {
+            "20d_return": round(period_return(20), 2) if period_return(20) is not None else None,
+            "60d_return": round(period_return(60), 2) if period_return(60) is not None else None,
+            "120d_return": round(period_return(120), 2) if period_return(120) is not None else None,
+            "120d_drawdown_from_high": round(drawdown_120, 2),
+        },
         "levels": {
             "support": round(support, 2),
             "resistance": round(resistance, 2),
@@ -281,6 +430,13 @@ def answer_stock_question(question: str, stock: StockRef, market: MarketData, st
     trend = build_trend_summary(kline, quote)
     announcements = _label_items(get_announcements(stock.code, question)[:8], "公告")
     news = _label_items(get_recent_news(stock.code)[:6], "新闻")
+    reports = _label_items(get_research_reports(stock.code), "研报")
+    reference_context = {
+        "fund_flow": get_fund_flow_summary(stock.code),
+        "market_attention": get_market_attention(stock.code),
+        "financial_snapshot": get_financial_snapshot(stock.code),
+        "research_reports": reports,
+    }
 
     data_pack = {
         "question": question,
@@ -288,7 +444,8 @@ def answer_stock_question(question: str, stock: StockRef, market: MarketData, st
         "trend": trend,
         "announcements": announcements,
         "news": news,
-        "source_priority": "公告优先级: 巨潮资讯公告 > 东方财富公告大全 > 个股新闻。",
+        "reference_context": reference_context,
+        "source_priority": "公告优先级: 巨潮资讯公告 > 东方财富公告大全 > 个股新闻 > 资金流/研报/财务/市场关注。",
     }
     system_prompt = (
         "你是给非专业家人使用的 A 股研究助手。只根据用户问题和提供的数据回答，"
@@ -301,12 +458,15 @@ def answer_stock_question(question: str, stock: StockRef, market: MarketData, st
 1. 先给一句“结论”
 2. “消息/公告”：优先引用公告来源，重组问题要说明最新状态和关键节点
 3. “最近一周走势”：说明涨跌、区间高低、量能、技术状态
-4. “偏向建议”：用谨慎措辞，给观察价位/支撑压力，不要承诺收益
-5. “主要风险”：列 2-4 条
+4. “资金/基本面/关注度”：结合资金流、财务、研报、市场关注数据；没有数据就说未取到
+5. “中线视角”：结合20/60/120日表现，不要只看短线
+6. “偏向建议”：用谨慎措辞，给观察价位/支撑压力，不要承诺收益
+7. “主要风险”：列 2-4 条
 不要使用 Markdown 表格或分隔线，飞书卡片里只用短段落和项目符号。
 
 引用要求：
 - 公告和新闻必须使用数据里 label 字段对应的编号，比如 [公告1]、[新闻1]。
+- 研报必须使用 label 字段编号，比如 [研报1]。
 - 如果数据里没有对应来源，要明确说“未查到近期对应公告/新闻”。
 
 数据：
@@ -326,4 +486,6 @@ def answer_stock_question(question: str, stock: StockRef, market: MarketData, st
     ]
     if news:
         source_notes.append(_format_sources(news[:3], "新闻"))
+    if reports:
+        source_notes.append(_format_sources(reports[:3], "研报"))
     return answer + "\n\n" + "\n".join(source_notes)

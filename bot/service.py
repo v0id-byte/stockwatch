@@ -6,7 +6,7 @@ from datetime import datetime
 
 from loguru import logger
 
-from analysis.sentiment import batch_sentiment
+from analysis.sentiment import batch_sentiment_details
 from analysis.technical import compute_tech_score
 from bot.research import answer_stock_question, resolve_stock
 from config import get_config
@@ -70,6 +70,34 @@ class BotService:
             return render_text_card("已停止跟踪", [f"已停止跟踪 `{code}`。"], template="green")
         return render_text_card("未找到跟踪", [f"`{code}` 没有正在跟踪的持仓。"], template="orange")
 
+    def open_price_alert(self, user_id: str, chat_id: str, code: str,
+                         trigger_price: float, quantity: float | None = None) -> dict:
+        quotes = self.market.get_realtime_quote([code])
+        quote = quotes.get(code, {})
+        name = quote.get("name", code)
+        self.storage.upsert_price_alert({
+            "user_id": user_id,
+            "chat_id": chat_id,
+            "code": code,
+            "name": name,
+            "trigger_price": trigger_price,
+            "quantity": quantity,
+            "note": "跌到目标价提醒加仓",
+        })
+        lines = [f"已盯 `{name}({code})`：跌到 {trigger_price:.2f} 元提醒加仓。"]
+        if quantity:
+            lines.append(f"计划数量：{quantity:g}股")
+        if quote:
+            lines.append(f"当前价：{quote.get('close', 0):.2f}元，今日涨跌：{quote.get('pct_change', 0):+.2f}%")
+        lines.append("触价时会顺带看盘口卖压，卖压重会提示先别急/考虑撤单。")
+        return render_text_card("加仓盯价已设置", lines, template="green")
+
+    def cancel_price_alert(self, user_id: str, code: str) -> dict:
+        count = self.storage.close_price_alert(user_id, code)
+        if count:
+            return render_text_card("已取消盯价", [f"已取消 `{code}` 的加仓盯价。"], template="green")
+        return render_text_card("未找到盯价", [f"`{code}` 没有正在生效的加仓盯价。"], template="orange")
+
     def _analyze_stock(self, code: str) -> tuple[dict, dict]:
         reset_token_usage()
         quotes = self.market.get_realtime_quote([code])
@@ -83,7 +111,8 @@ class BotService:
             raise RuntimeError(f"{code} K线不足，暂时无法分析")
 
         tech_result = compute_tech_score(kline)
-        sentiment = batch_sentiment([(code, name)], storage=self.storage).get(code, 0.0)
+        sentiment_detail = batch_sentiment_details([(code, name)], storage=self.storage).get(code, {})
+        sentiment = sentiment_detail.get("score", 0.0)
         alpha_summary, lgbm_context = self._factor_contexts(code, kline)
         regime_context = self._regime_context()
         sector_context = self._sector_context(code)
@@ -92,6 +121,8 @@ class BotService:
             code, name,
             tech_result["score"], sentiment,
             kline,
+            tech_details=tech_result.get("details"),
+            sentiment_context=sentiment_detail.get("context", ""),
             north_context="即时查询跳过北向Top5",
             sht_pct=self.market.get_index_pct(),
             alpha_summary=alpha_summary,

@@ -49,6 +49,8 @@ class MarketData:
                 if len(fields) < 40:
                     continue
                 try:
+                    buy_volume_5 = sum(_to_float(fields[i]) for i in [10, 12, 14, 16, 18] if len(fields) > i)
+                    sell_volume_5 = sum(_to_float(fields[i]) for i in [20, 22, 24, 26, 28] if len(fields) > i)
                     result[code] = {
                         "name": fields[1].strip(),
                         "open": float(fields[5]) if fields[5] else 0,
@@ -57,6 +59,11 @@ class MarketData:
                         "close": float(fields[3]),
                         "volume": float(fields[37]) if fields[37] else 0,
                         "pct_change": float(fields[32]) if fields[32] else 0,
+                        "quote_time": fields[30] if len(fields) > 30 else "",
+                        "outer_volume": _to_float(fields[7]) if len(fields) > 7 else 0,
+                        "inner_volume": _to_float(fields[8]) if len(fields) > 8 else 0,
+                        "buy_volume_5": buy_volume_5,
+                        "sell_volume_5": sell_volume_5,
                     }
                 except (ValueError, IndexError):
                     continue

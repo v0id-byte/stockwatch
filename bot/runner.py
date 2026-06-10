@@ -75,6 +75,15 @@ def run_bot():
                         ], template="orange")
                     else:
                         card = service.open_position(user_id, chat_id, command.code, command.price, command.quantity)
+                elif command.action == "price_alert":
+                    if command.price is None or command.price <= 0:
+                        card = render_text_card("盯价命令缺少价格", [
+                            f"请发送：`盯买 {command.code} 目标价`，例如 `盯买 {command.code} 1500`",
+                        ], template="orange")
+                    else:
+                        card = service.open_price_alert(user_id, chat_id, command.code, command.price, command.quantity)
+                elif command.action == "cancel_price_alert":
+                    card = service.cancel_price_alert(user_id, command.code)
                 elif command.action == "sell":
                     card = service.close_position(user_id, command.code)
                 else:

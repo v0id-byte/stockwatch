@@ -112,6 +112,28 @@ class Storage:
             message_id TEXT,
             handled_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS price_alerts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT,
+            chat_id TEXT,
+            code TEXT NOT NULL,
+            name TEXT,
+            trigger_price REAL NOT NULL,
+            direction TEXT NOT NULL DEFAULT 'below',
+            quantity REAL,
+            status TEXT NOT NULL DEFAULT 'active',
+            note TEXT,
+            created_at TEXT NOT NULL,
+            closed_at TEXT,
+            last_notified_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS alert_events (
+            event_key TEXT PRIMARY KEY,
+            event_type TEXT,
+            code TEXT,
+            title TEXT,
+            sent_at TEXT NOT NULL
+        );
         """)
 
     @staticmethod
@@ -393,3 +415,80 @@ class Storage:
                 "UPDATE tracked_positions SET last_notified_at=? WHERE id=?",
                 [datetime.now().isoformat(), position_id],
             )
+
+    def upsert_price_alert(self, row: dict):
+        now = datetime.now().isoformat()
+        payload = {
+            "user_id": row.get("user_id", ""),
+            "chat_id": row.get("chat_id", ""),
+            "code": row["code"],
+            "name": row.get("name", row["code"]),
+            "trigger_price": row.get("trigger_price", 0),
+            "direction": row.get("direction", "below"),
+            "quantity": row.get("quantity"),
+            "note": row.get("note", ""),
+            "created_at": row.get("created_at", now),
+        }
+        with self._conn() as conn:
+            existing = conn.execute("""
+                SELECT id FROM price_alerts
+                WHERE user_id=? AND code=? AND status='active'
+                ORDER BY created_at DESC LIMIT 1
+            """, [payload["user_id"], payload["code"]]).fetchone()
+            if existing:
+                conn.execute("""
+                    UPDATE price_alerts
+                    SET chat_id=:chat_id, name=:name, trigger_price=:trigger_price,
+                        direction=:direction, quantity=:quantity, note=:note,
+                        created_at=:created_at, closed_at=NULL, last_notified_at=NULL
+                    WHERE id=:id
+                """, {**payload, "id": existing[0]})
+            else:
+                conn.execute("""
+                    INSERT INTO price_alerts
+                    (user_id, chat_id, code, name, trigger_price, direction, quantity,
+                     status, note, created_at)
+                    VALUES (:user_id, :chat_id, :code, :name, :trigger_price, :direction,
+                            :quantity, 'active', :note, :created_at)
+                """, payload)
+
+    def close_price_alert(self, user_id: str, code: str) -> int:
+        with self._conn() as conn:
+            cur = conn.execute("""
+                UPDATE price_alerts
+                SET status='closed', closed_at=?
+                WHERE user_id=? AND code=? AND status='active'
+            """, [datetime.now().isoformat(), user_id or "", code])
+            return cur.rowcount
+
+    def get_active_price_alerts(self) -> list[dict]:
+        with self._conn() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute("""
+                SELECT * FROM price_alerts
+                WHERE status='active'
+                ORDER BY created_at ASC
+            """).fetchall()
+        return [dict(r) for r in rows]
+
+    def mark_price_alert_notified(self, alert_id: int):
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE price_alerts SET last_notified_at=? WHERE id=?",
+                [datetime.now().isoformat(), alert_id],
+            )
+
+    def alert_event_exists(self, event_key: str) -> bool:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM alert_events WHERE event_key=? LIMIT 1",
+                [event_key],
+            ).fetchone()
+        return row is not None
+
+    def mark_alert_event(self, event_key: str, event_type: str, code: str = "", title: str = ""):
+        with self._conn() as conn:
+            conn.execute("""
+                INSERT OR IGNORE INTO alert_events (event_key, event_type, code, title, sent_at)
+                VALUES (?, ?, ?, ?, ?)
+            """, [event_key, event_type, code, title, datetime.now().isoformat()])

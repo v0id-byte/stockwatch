@@ -24,7 +24,9 @@ _ENGINE_PROMPT = """你是一个A股智能决策助手。请对以下股票给�
 名称: {name}
 当前价: {price}元
 技术面分数: {tech_score:.3f}（-1到+1，越高越强势）
-情绪面分数: {sentiment:.3f}（-1到+1，越高越乐观）
+消息面指数: {sentiment:.3f}（-1到+1，越高越乐观）
+消息面摘要:
+{sentiment_context}
 大盘上下文：
   - 北向资金: {north_money}
   - 上证涨跌: {sht000001_pct:.2f}%
@@ -65,8 +67,9 @@ _ENGINE_PROMPT_V2 = """你是一个A股智能决策助手。请对以下股票�
 {alpha_summary}
 {lgbm_context}
 
-【基本面信号】
-- 情绪面: {sentiment:.3f}
+【消息面信号】
+- 消息面指数: {sentiment:.3f}
+{sentiment_context}
 
 【市场结构】
 - {regime_context}
@@ -151,6 +154,103 @@ def _default_position_basis(action: str, support: float, resistance: float) -> s
     return ""
 
 
+def _detail_float(value) -> float | None:
+    try:
+        num = float(value)
+        return num if math.isfinite(num) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _format_tech_summary(score: float, details: dict | None) -> str:
+    details = details or {}
+    if details.get("error"):
+        return str(details["error"])
+
+    parts = []
+    ma_cross = details.get("ma_cross")
+    if ma_cross == "golden_cross":
+        parts.append("短均线站上20日线")
+    elif ma_cross == "death_cross":
+        parts.append("短均线跌破20日线")
+
+    macd_bar = details.get("macd_bar")
+    if macd_bar is not None:
+        macd_bar = _detail_float(macd_bar)
+        if macd_bar is not None:
+            parts.append("MACD红柱" if macd_bar > 0 else "MACD绿柱")
+
+    rsi = details.get("rsi14")
+    if rsi is not None:
+        rsi = _detail_float(rsi)
+        if rsi is not None:
+            if rsi >= 70:
+                parts.append(f"RSI {rsi:.1f} 偏热")
+            elif rsi <= 30:
+                parts.append(f"RSI {rsi:.1f} 超卖")
+            elif rsi >= 50:
+                parts.append(f"RSI {rsi:.1f} 偏强")
+            else:
+                parts.append(f"RSI {rsi:.1f} 偏弱")
+
+    boll = details.get("boll_position")
+    if boll is not None:
+        boll = _detail_float(boll)
+        if boll is not None:
+            if boll >= 0.9:
+                parts.append("接近布林上轨")
+            elif boll <= 0.1:
+                parts.append("接近布林下轨")
+
+    vol_ratio = details.get("vol_ratio")
+    if vol_ratio is not None:
+        vol_ratio = _detail_float(vol_ratio)
+        if vol_ratio is not None:
+            if vol_ratio >= 2:
+                parts.append(f"放量{vol_ratio:.1f}倍")
+            elif 0 < vol_ratio <= 0.7:
+                parts.append(f"缩量{vol_ratio:.1f}倍")
+
+    if parts:
+        return "；".join(parts[:4])
+    if score >= 0.2:
+        return "技术面偏强"
+    if score <= -0.2:
+        return "技术面偏弱"
+    return "技术面中性"
+
+
+def _format_sentiment_summary(sentiment: float) -> str:
+    if sentiment >= 0.3:
+        return "明显正面"
+    if sentiment >= 0.08:
+        return "偏正面"
+    if sentiment <= -0.3:
+        return "明显负面"
+    if sentiment <= -0.08:
+        return "偏负面"
+    return "中性"
+
+
+def _compact_context(text: str) -> str:
+    lines = [line.strip(" -") for line in str(text or "").splitlines() if line.strip()]
+    return "；".join(lines)[:300]
+
+
+def _analysis_payload(tech_score: float, sentiment: float, tech_details: dict | None,
+                      sentiment_context: str,
+                      alpha_summary: str, lgbm_context: str) -> dict:
+    return {
+        "tech_score": round(_safe_float(tech_score), 3),
+        "tech_summary": _format_tech_summary(_safe_float(tech_score), tech_details),
+        "sentiment_score": round(_safe_float(sentiment), 3),
+        "sentiment_summary": _format_sentiment_summary(_safe_float(sentiment)),
+        "sentiment_context": _compact_context(sentiment_context),
+        "alpha_summary": _compact_context(alpha_summary),
+        "lgbm_context": _compact_context(lgbm_context),
+    }
+
+
 class DecisionEngine:
     """决策引擎：技术分析 → LLM → 兜底"""
 
@@ -162,6 +262,8 @@ class DecisionEngine:
 
     def decide_one(self, code: str, name: str, tech_score: float,
                    sentiment: float, kline: list[dict],
+                   tech_details: dict | None = None,
+                   sentiment_context: str = "",
                    north_context: str = "未知", sht_pct: float = 0.0,
                    alpha_summary: str = "", lgbm_context: str = "",
                    regime_context: str = "大盘 regime: normal",
@@ -172,19 +274,23 @@ class DecisionEngine:
         floor = confidence_floor if confidence_floor is not None else self.cfg.min_confidence_to_push
         price_levels = _derive_price_levels(kline, current_price)
         price_context = _format_price_context(price_levels)
+        analysis_payload = _analysis_payload(
+            tech_score, sentiment, tech_details, sentiment_context,
+            alpha_summary, lgbm_context
+        )
 
         # ---- 涨停/ST/次新：强制 HOLD ----
         if kline and len(kline) >= 2:
             pct = (kline[-1]["close"] / kline[-2]["close"] - 1) * 100
             if pct >= 9.5:
                 logger.info(f"{code}({name}) 涨停，强制 HOLD")
-                return self._hold_decision(code, name, current_price, "涨停禁止买入")
+                return self._hold_decision(code, name, current_price, "涨停禁止买入", analysis_payload)
         if "ST" in name or "*ST" in name or "退" in name:
             logger.info(f"{code}({name}) ST/*ST/退市，强制 HOLD")
-            return self._hold_decision(code, name, current_price, "ST/*ST/退市风险")
+            return self._hold_decision(code, name, current_price, "ST/*ST/退市风险", analysis_payload)
         if kline and len(kline) < 60:
             logger.info(f"{code}({name}) 上市不足60个交易日，强制 HOLD")
-            return self._hold_decision(code, name, current_price, "上市不足60个交易日")
+            return self._hold_decision(code, name, current_price, "上市不足60个交易日", analysis_payload)
 
         # ---- LLM 决策 ----
         try:
@@ -194,6 +300,7 @@ class DecisionEngine:
                     price=current_price,
                     tech_score=tech_score,
                     sentiment=sentiment,
+                    sentiment_context=sentiment_context or "- 近7日未获取到可用消息面摘要",
                     alpha_summary=alpha_summary or "- Alpha158 摘要: 未启用",
                     lgbm_context=lgbm_context or "- LightGBM 排序预测: 未启用",
                     regime_context=regime_context,
@@ -210,6 +317,7 @@ class DecisionEngine:
                     price=current_price,
                     tech_score=tech_score,
                     sentiment=sentiment,
+                    sentiment_context=sentiment_context or "- 近7日未获取到可用消息面摘要",
                     north_money=north_context,
                     sht000001_pct=sht_pct,
                     sector_sentiment="中性",
@@ -285,9 +393,10 @@ class DecisionEngine:
             "one_liner": one_liner[:50],
             "_will_push": will_push,
             "_current_price": current_price,
+            **analysis_payload,
         }
 
-    def _hold_decision(self, code, name, price, reason):
+    def _hold_decision(self, code, name, price, reason, analysis_payload=None):
         return {
             "code": code, "name": name, "action": "HOLD",
             "confidence": 0.5, "raw_confidence": 0.5, "calibrated_confidence": 0.5,
@@ -297,4 +406,5 @@ class DecisionEngine:
             "risks_json": json.dumps(["风险提示：规则强制HOLD"], ensure_ascii=False),
             "one_liner": f"{name} {reason}，保持观望",
             "_will_push": False, "_current_price": price,
+            **(analysis_payload or {}),
         }
