@@ -13,9 +13,26 @@ sys.path.insert(0, str(ROOT))
 
 from analysis.factors import ALPHA158_FEATURES
 
+STABLE_FEATURE_PREFIXES = (
+    "ILLIQ", "BETA", "RSV", "DD", "RET", "ROC", "RELV", "STD",
+    "RSQR", "CORR", "VMA", "WVMA", "TURN", "VOLZ", "MOM", "SHARPE",
+)
+
 
 def _group_sizes(df):
     return df.groupby("trade_date", sort=False).size().tolist()
+
+
+def _feature_names() -> tuple[str, list[str]]:
+    feature_set = os.getenv("STOCKWATCH_LGBM_FEATURE_SET", "stable").strip().lower()
+    if feature_set == "all":
+        return "all", ALPHA158_FEATURES
+    if feature_set != "stable":
+        print(f"unknown STOCKWATCH_LGBM_FEATURE_SET={feature_set}, fallback to stable")
+    return "stable", [
+        name for name in ALPHA158_FEATURES
+        if name.startswith(STABLE_FEATURE_PREFIXES)
+    ]
 
 
 def _mean_ndcg(df, pred, k: int) -> float | None:
@@ -113,43 +130,47 @@ def main():
     test = df[df["trade_date"] >= test_start]
     if train.empty or val.empty or test.empty:
         raise RuntimeError("训练/验证/测试切分为空，请检查历史数据跨度")
+    feature_set, feature_names = _feature_names()
+    if not feature_names:
+        raise RuntimeError("训练特征为空，请检查 STOCKWATCH_LGBM_FEATURE_SET")
 
     params = {
         "objective": "lambdarank",
         "metric": "ndcg",
         "ndcg_eval_at": [5, 10],
-        "learning_rate": 0.05,
+        "learning_rate": 0.03,
         "num_leaves": 31,
-        "max_depth": 6,
-        "min_data_in_leaf": 100,
-        "feature_fraction": 0.8,
-        "bagging_fraction": 0.8,
+        "max_depth": 5,
+        "min_data_in_leaf": 200,
+        "feature_fraction": 0.85,
+        "bagging_fraction": 0.85,
         "bagging_freq": 5,
         "verbose": -1,
+        "seed": 42,
     }
     train_set = lgb.Dataset(
-        train[ALPHA158_FEATURES],
+        train[feature_names],
         label=train["label"],
         group=_group_sizes(train),
-        feature_name=ALPHA158_FEATURES,
+        feature_name=feature_names,
     )
     val_set = lgb.Dataset(
-        val[ALPHA158_FEATURES],
+        val[feature_names],
         label=val["label"],
         group=_group_sizes(val),
-        feature_name=ALPHA158_FEATURES,
+        feature_name=feature_names,
         reference=train_set,
     )
     model = lgb.train(
         params,
         train_set,
-        num_boost_round=500,
+        num_boost_round=300,
         valid_sets=[val_set],
-        callbacks=[lgb.early_stopping(30), lgb.log_evaluation(20)],
+        callbacks=[lgb.early_stopping(25), lgb.log_evaluation(20)],
     )
 
-    val_pred = model.predict(val[ALPHA158_FEATURES], num_iteration=model.best_iteration)
-    test_pred = model.predict(test[ALPHA158_FEATURES], num_iteration=model.best_iteration)
+    val_pred = model.predict(val[feature_names], num_iteration=model.best_iteration)
+    test_pred = model.predict(test[feature_names], num_iteration=model.best_iteration)
     validation_metrics = _evaluate_split(val, val_pred, return_col)
     test_metrics = _evaluate_split(test, test_pred, return_col)
     out_dir = ROOT / "models"
@@ -157,14 +178,16 @@ def main():
     model_path = out_dir / "lgbm.txt"
     model.save_model(str(model_path))
     importance = sorted(
-        zip(ALPHA158_FEATURES, model.feature_importance(importance_type="gain")),
+        zip(feature_names, model.feature_importance(importance_type="gain")),
         key=lambda item: item[1],
         reverse=True,
     )
     meta = {
         "trained_at": datetime.now().isoformat(),
-        "features": ALPHA158_FEATURES,
-        "feature_count": len(ALPHA158_FEATURES),
+        "features": feature_names,
+        "feature_set": feature_set,
+        "feature_count": len(feature_names),
+        "available_feature_count": len(ALPHA158_FEATURES),
         "label_horizon_days": label_horizon,
         "return_col": return_col,
         "ndcg5": test_metrics["ndcg5"],
