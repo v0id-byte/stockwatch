@@ -66,12 +66,12 @@ class MarketData:
             return {}
 
     @staticmethod
-    def get_daily_kline(code: str, period: str = "daily", adjust: str = "qfq") -> list[dict]:
+    def get_daily_kline(code: str, period: str = "daily", adjust: str = "qfq", limit: int = 320) -> list[dict]:
         """腾讯财经日线前复权"""
         try:
             prefix = "sh" if code.startswith(('6', '5')) else "sz"
             url = (f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
-                   f"?_var=kline_dayfqzf&param={prefix}{code},day,,,320,qfq&r=0.1")
+                   f"?_var=kline_dayfqzf&param={prefix}{code},day,,,{limit},qfq&r=0.1")
             resp = requests.get(url, headers=HEADERS, timeout=10)
             resp.encoding = 'utf-8'
             text = resp.text.strip()

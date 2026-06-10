@@ -44,6 +44,16 @@ def format_lgbm_context(scores_by_code: dict[str, float | None]) -> dict[str, st
     valid = {code: score for code, score in scores_by_code.items() if score is not None}
     if not valid:
         return {code: "LightGBM 排序模型预测: 未加载，跳过" for code in scores_by_code}
+    if len(valid) == 1:
+        code, score = next(iter(valid.items()))
+        contexts = {
+            code: f"LightGBM 排序模型预测: 原始分 {score:.4f}（单票无法横向排名）"
+        }
+        for item_code, item_score in scores_by_code.items():
+            if item_score is None:
+                contexts[item_code] = "LightGBM 排序模型预测: 未加载，跳过"
+        return contexts
+
     ordered = sorted(valid.items(), key=lambda item: item[1])
     denom = max(1, len(ordered) - 1)
     contexts = {}
