@@ -1,6 +1,6 @@
 # StockWatch — A股智能盯盘系统
 
-> 在树莓派5上运行，每日3次飞书推送，为非技术用户（我母亲）提供买卖建议。
+> 可部署在 macOS 或 Linux 服务器上；作者当前将它跑在树莓派 5 上作为 24 小时家庭盯盘服务。
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB)](https://www.python.org/)
 [![LightGBM](https://img.shields.io/badge/LightGBM-ranking-00A35C)](https://github.com/microsoft/LightGBM)
@@ -10,7 +10,7 @@
 
 中文 | [English](#english)
 
-**关键词**：A股量化、股票盯盘、股票机器人、飞书机器人、A股新闻分析、股票公告解读、LightGBM 排序模型、Alpha158 因子、AKShare、树莓派部署。
+**关键词**：A股量化、股票盯盘、股票机器人、飞书机器人、A股新闻分析、股票公告解读、LightGBM 排序模型、Alpha158 因子、AKShare、macOS/Linux 部署、树莓派 24h 服务。
 
 StockWatch 是一个面向 A 股个人投资辅助场景的轻量级系统：用 AKShare、腾讯财经等数据源获取行情/新闻/公告，结合技术面、消息面、Alpha 因子和 LightGBM 排序模型，最终通过飞书机器人给出“偏向建议 + 风险提醒 + 观察价位”的中文解释。
 
@@ -26,7 +26,7 @@ StockWatch 是一个面向 A 股个人投资辅助场景的轻量级系统：用
 - **消息面分析**：抓取近况新闻、公司公告、研报、资金流、财务快照和市场关注信息，交给模型生成可读建议。
 - **量化因子**：计算扩展版 Alpha158/Alpha300 风格因子，覆盖动量、波动、Beta、流动性冲击、相对强弱、回撤和成交量结构。
 - **LightGBM 排序模型**：离线训练 A 股横截面排序模型，线上作为辅助信号参与解释。
-- **树莓派部署**：systemd 常驻服务 + SQLite 本地存储，适合低成本 24 小时运行。
+- **macOS/Linux 部署**：systemd/命令行常驻服务 + SQLite 本地存储；作者使用树莓派 5 低成本 24 小时运行。
 
 ---
 
@@ -177,11 +177,11 @@ python scripts/bootstrap_history.py
 python scripts/build_training_set.py
 python scripts/train_lgbm.py
 
-# 输出 models/lgbm.txt 和 models/lgbm_meta.json 后，拷到树莓派
-scp models/lgbm.* pi@<rpi_ip>:~/.stockwatch/models/
+# 输出 models/lgbm.txt 和 models/lgbm_meta.json 后，拷到部署机器
+scp models/lgbm.* <user>@<host>:~/.stockwatch/models/
 ```
 
-树莓派推理端只在 `ENABLE_LGBM=true` 时加载模型；模型缺失会记录日志并跳过。
+部署端只在 `ENABLE_LGBM=true` 时加载模型；模型缺失会记录日志并跳过。
 
 当前默认训练配置使用 `stable` 因子子集，聚焦历史验证中更稳定的流动性冲击、Beta、阶段位置、相对动量和波动类因子。如需回到全量因子训练：
 
@@ -264,7 +264,7 @@ The output is designed for non-technical users: a directional view, risk reminde
 - Source-aware context from company announcements, exchange-style disclosures, news, research reports, fund flow, financial data and market attention.
 - Alpha158/Alpha300-style pandas factors covering momentum, volatility, beta, liquidity shock, relative strength, drawdown and volume structure.
 - Optional LightGBM LambdaRank model trained offline and used online as an auxiliary signal.
-- Raspberry Pi friendly deployment with systemd and SQLite.
+- Deployable on macOS or Linux with SQLite storage; the author's 24/7 instance runs on a Raspberry Pi 5.
 
 ### Quick Start
 
