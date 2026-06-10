@@ -8,6 +8,7 @@ from loguru import logger
 
 from analysis.sentiment import batch_sentiment
 from analysis.technical import compute_tech_score
+from bot.research import answer_stock_question, resolve_stock
 from config import get_config
 from data.market import MarketData
 from decision.engine import DecisionEngine
@@ -26,6 +27,23 @@ class BotService:
         decision, quote = self._analyze_stock(code)
         extra = self._quote_lines(quote)
         return render_single_decision_card(decision, title="股票即时分析", extra_lines=extra)
+
+    def research_stock(self, text: str, code: str = "") -> dict:
+        query = text or code
+        stock = resolve_stock(query, self.market)
+        if code and (not stock or stock.code != code):
+            quote = self.market.get_realtime_quote([code]).get(code, {})
+            stock = resolve_stock(code, self.market)
+            if stock and quote.get("name"):
+                stock.name = quote["name"]
+        if not stock:
+            return render_text_card("没识别到股票", [
+                "请带上股票代码或股票名称再问。",
+                "例如：`600449宁夏建材重组情况如何`",
+                "例如：`宁夏建材最近一周走势怎么样`",
+            ], template="orange")
+        answer = answer_stock_question(query, stock, self.market, self.storage)
+        return render_text_card(f"{stock.name}({stock.code}) 深度问答", answer.splitlines())
 
     def open_position(self, user_id: str, chat_id: str, code: str,
                       buy_price: float, quantity: float | None = None) -> dict:

@@ -16,6 +16,7 @@ class BotCommand:
     code: str = ""
     price: float | None = None
     quantity: float | None = None
+    text: str = ""
 
 
 def _to_float(raw: str | None) -> float | None:
@@ -52,15 +53,19 @@ def parse_command(text: str) -> BotCommand:
 
     code = _CODE_RE.search(text)
     if code:
-        return BotCommand("query", code=code.group(1))
+        bare_query = re.fullmatch(r"(?:查|查询)?\s*(\d{6})\s*", text)
+        if bare_query:
+            return BotCommand("query", code=bare_query.group(1))
+        return BotCommand("research", code=code.group(1), text=text)
 
-    return BotCommand("help")
+    return BotCommand("research", text=text)
 
 
 def help_lines() -> list[str]:
     return [
         "**可用命令**",
         "查股票：`600519` 或 `查 600519`",
+        "问近况：`宁夏建材重组怎么样`、`600449 最近一周走势如何`",
         "开始跟踪：`买入 600519 1680`，可追加数量：`买入 600519 1680 100股`",
         "停止跟踪：`卖出 600519` 或 `停止跟踪 600519`",
     ]

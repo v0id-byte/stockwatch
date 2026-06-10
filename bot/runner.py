@@ -66,6 +66,8 @@ def run_bot():
                 command = parse_command(_message_text(message))
                 if command.action == "query":
                     card = service.query_stock(command.code)
+                elif command.action == "research":
+                    card = service.research_stock(command.text, command.code)
                 elif command.action == "buy":
                     if command.price is None or command.price <= 0:
                         card = render_text_card("买入命令缺少价格", [

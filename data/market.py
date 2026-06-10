@@ -34,7 +34,7 @@ class MarketData:
         try:
             url = f"https://qt.gtimg.cn/q={code_str}"
             resp = requests.get(url, headers=HEADERS, timeout=10)
-            resp.encoding = 'utf-8'
+            resp.encoding = 'gb18030'
             lines = resp.text.strip().split('\n')
             result = {}
             for line in lines:
