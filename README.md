@@ -389,21 +389,46 @@ The output is designed for non-technical users: a directional view, risk reminde
 - Docker Compose deployment for the daemon, dashboard and optional bot service.
 - Deployable on macOS or Linux with SQLite storage; the author's 24/7 instance runs on a Raspberry Pi 5.
 
+### Real Output
+
+Natural-language question example: `我想看看贵州茅台行情怎么样` ("I want to check how Kweichow Moutai is doing"). The bot replies with a conclusion, announcements/news, recent price action, fund-flow/fundamental/attention context, medium-term view, cautious directional notes, key risks and source references.
+
+![Feishu natural-language research reply, top](docs/assets/feishu-research-top.png)
+
+![Feishu natural-language research reply, bottom](docs/assets/feishu-research-bottom.png)
+
 ### Quick Start
 
+#### 1. Five-minute terminal demo
+
+Run a terminal demo before setting up Feishu/Lark. Without a MiniMax API key, StockWatch falls back to a rule-based market or stock snapshot. With MiniMax configured, it returns the full natural-language research answer.
+
 ```bash
+# Enter the repository after cloning it
+cd StockWatch
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env
-```
 
-You can try the terminal demo before configuring Feishu/Lark:
-
-```bash
+# Natural-language stock question
 python main.py demo "600519 最近一周走势如何"
+
+# General market question
 python main.py demo "现在行情怎么样"
 ```
+
+#### 2. Configure credentials
+
+```bash
+cp .env.example .env
+nano .env
+```
+
+Required values:
+
+- `MINIMAX_API_KEY` — MiniMax API key
+- `FEISHU_APP_ID` / `FEISHU_APP_SECRET` — Feishu/Lark self-built app credentials
+- `FEISHU_RECEIVE_ID` — receiver `open_id`, `user_id` or email
 
 Edit `.env` with your MiniMax and Feishu/Lark credentials, then run:
 
@@ -415,14 +440,84 @@ python main.py dashboard
 python main.py report --horizon 5
 ```
 
-For Docker deployment:
+#### 3. Configure the watchlist
 
 ```bash
+# Edit WATCHLIST in .env. Use comma-separated six-digit stock or ETF codes.
+WATCHLIST=600519,000858,510300,510500,159915
+```
+
+#### 4. Docker Compose
+
+```bash
+cp .env.example .env
+nano .env
+
+# Scheduled daemon + dashboard
 docker compose up -d stockwatch dashboard
+
+# Optional Feishu/Lark long-connection bot
 docker compose --profile bot up -d
+
+# Open the dashboard
+open http://127.0.0.1:8765
+```
+
+Container data is stored in the `stockwatch-data` volume, mapped to `/root/.stockwatch` inside the containers.
+
+#### 5. systemd deployment
+
+```bash
+scripts/install.sh
 ```
 
 For systemd deployment, see `scripts/install.sh`, `scripts/stockwatch.service` and `scripts/stockwatch-bot.service`.
+
+### Logs
+
+```bash
+tail -f ~/.stockwatch/logs/stockwatch_$(date +%Y%m%d).log
+```
+
+Logs are stored under `~/.stockwatch/logs/` and retained for seven days.
+
+### SQLite Storage
+
+```bash
+sqlite3 ~/.stockwatch/db.sqlite
+sqlite3 ~/.stockwatch/db.sqlite "SELECT * FROM runs ORDER BY run_ts DESC LIMIT 5;"
+sqlite3 ~/.stockwatch/db.sqlite "SELECT run_id, code, name, action, confidence, pushed FROM decisions ORDER BY run_ts DESC LIMIT 20;"
+```
+
+### Local Dashboard
+
+```bash
+python main.py dashboard
+```
+
+Default URL: `http://127.0.0.1:8765`.
+
+The dashboard is read-only and reads directly from the local SQLite database. It shows recent runs, recent signals, active tracked positions, active price alerts and a five-trading-day signal review summary.
+
+With Docker:
+
+```bash
+docker compose up -d dashboard
+```
+
+### Signal Review Report
+
+```bash
+# Print a five-trading-day signal report
+python main.py report --horizon 5
+
+# Write the report to Markdown
+python main.py report --horizon 5 --output reports/backtest.md
+```
+
+The report uses local `decisions` and `daily_kline` records to calculate sample count, hit rate, average forward-window return and median forward-window return for BUY/SELL/HOLD signals. The hit-rate definition is intentionally simple: BUY is counted as a hit when the forward-window return is positive, SELL when it is negative, and HOLD when the forward-window return stays within ±2%.
+
+This is a research review only. It is not a profit claim and does not modify the database.
 
 ### Bot Examples
 
@@ -437,13 +532,76 @@ For systemd deployment, see `scripts/install.sh`, `scripts/stockwatch.service` a
 卖出 600519
 ```
 
+Sending only a stock code returns an immediate single-stock analysis. Natural-language questions enter the research flow: if a stock is recognized, StockWatch answers about that stock; if no stock is recognized, it answers a general market question. `买入` starts position tracking, `盯买` creates a buy-price alert, and `卖出` stops tracking.
+
+### Schedule
+
+Default scheduled run times in `Asia/Shanghai`:
+
+- `09:10` before market open: overnight context and daily watch plan
+- `12:30` midday: morning-session review and afternoon notes
+- `15:15` after close: full-day review and next-day observation points
+
+Non-trading days are skipped automatically.
+
+### v2 Feature Flags
+
+The v2 modules are off by default:
+
+```bash
+ENABLE_CALIBRATION=false
+ENABLE_ALPHA158=false
+ENABLE_LGBM=false
+ENABLE_REGIME=false
+ENABLE_SECTOR=false
+```
+
+Suggested enablement order:
+
+```text
+ENABLE_REGIME -> ENABLE_SECTOR -> ENABLE_ALPHA158 -> ENABLE_CALIBRATION -> ENABLE_LGBM
+```
+
+For LightGBM offline training:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+pip install -r requirements-train.txt
+
+python scripts/bootstrap_history.py
+python scripts/build_training_set.py
+python scripts/train_lgbm.py
+```
+
+Copy `models/lgbm.txt` and `models/lgbm_meta.json` to the deployment machine under `~/.stockwatch/models/`, then set `ENABLE_LGBM=true`.
+
+### Roadmap / Contributions Welcome
+
+Already included:
+
+- Terminal `demo` mode, so users can try the project before setting up Feishu/Lark.
+- Docker Compose deployment.
+- Local read-only dashboard.
+- Historical signal review report.
+- Clearer data-source, service-boundary and investment-risk documentation.
+
+Contribution ideas:
+
+- WeCom, Telegram, DingTalk or other notification adapters. The current maintained and personally verified channel is Feishu/Lark, so other channels are welcome as issues or pull requests.
+- Richer dashboard views, such as stock detail pages, signal trend charts and position curves.
+- More report dimensions, such as sector-level, confidence-bucket and market-regime breakdowns.
+- Lower-friction setup checks for Feishu/Lark permissions, receiver IDs and model connectivity.
+
 ### Data, Model and Services
 
 - Market and research data are fetched at runtime mainly through AKShare-wrapped public endpoints, Tencent Finance-style quote endpoints, CNINFO-style announcements and Eastmoney-style public pages.
 - Third-party market data, announcements, news and research reports are not redistributed in this repository.
 - The LightGBM model is trained offline with historical A-share data and is only used as an auxiliary ranking signal.
 - StockWatch does not connect to brokerage accounts and does not place trades.
-- LLM output may be delayed, incomplete or wrong. Users should verify exchange disclosures, company filings and brokerage/trading system data independently.
+- `.env`, SQLite databases, logs, model files and Feishu/Lark or MiniMax credentials should stay local or in private deployment environments. Do not commit them to public repositories.
+- LLM output may be delayed, incomplete or wrong. Third-party data sources may be delayed, rate-limited or change fields without notice. Users should verify exchange disclosures, company filings and brokerage/trading system data independently.
 
 ### Open Source Attribution
 
@@ -475,7 +633,7 @@ StockWatch is released under the [MIT License](LICENSE). MIT is a practical choi
 
 ### Disclaimer
 
-This project is for personal learning, quantitative research and household reminders only. Stock markets are risky. Models, factors, signal reports, news summaries and LLM responses can be wrong. Users are responsible for verifying primary sources and making their own investment decisions.
+This project is for personal learning, quantitative research and household reminders only. Stock markets are risky. Models, factors, signal reports, news summaries and LLM responses can be wrong, and data sources may fail because of delay, rate limits or field changes. Users are responsible for verifying primary sources and making their own investment decisions.
 
 ---
 
