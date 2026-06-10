@@ -404,6 +404,188 @@ def build_trend_summary(kline: list[dict], quote: dict) -> dict:
     }
 
 
+def _period_return_from_kline(kline: list[dict], days: int) -> float | None:
+    if len(kline) <= days:
+        return None
+    base = _safe_float(kline[-days - 1].get("close"))
+    last = _safe_float(kline[-1].get("close"))
+    if not base or not last:
+        return None
+    return round((last / base - 1) * 100, 2)
+
+
+def build_market_snapshot(
+    market: MarketData,
+    storage: Storage | None = None,
+    include_news: bool = True,
+    include_north: bool = True,
+    include_regime: bool = True,
+) -> dict:
+    """Collect a compact A-share market snapshot for general bot questions."""
+    indexes = []
+    for code, name in [
+        ("sh000001", "上证指数"),
+        ("sz399001", "深证成指"),
+        ("sz399006", "创业板指"),
+        ("sh000300", "沪深300"),
+    ]:
+        kline = market.get_index_kline(code, limit=80)
+        latest = kline[-1] if kline else {}
+        indexes.append({
+            "code": code,
+            "name": name,
+            "close": _safe_float(latest.get("close")),
+            "pct_change": round(market.get_index_pct(code), 2),
+            "return_5d": _period_return_from_kline(kline, 5),
+            "return_20d": _period_return_from_kline(kline, 20),
+        })
+
+    north = []
+    if include_north:
+        try:
+            north = market.get_north_money()[:5]
+        except Exception as e:
+            logger.debug(f"北向资金快照失败: {e}")
+
+    telegraph = []
+    if include_news:
+        try:
+            telegraph = [
+                {
+                    "source": item.get("source", "财联社"),
+                    "date": _display_text(item.get("ts", "")),
+                    "title": _display_text(item.get("title") or item.get("content"), 120),
+                }
+                for item in NewsData.get_telegraph()[:6]
+            ]
+        except Exception as e:
+            logger.debug(f"大盘电报快照失败: {e}")
+
+    regime = {}
+    if storage is not None and include_regime:
+        try:
+            from analysis.regime import get_market_regime
+            regime = get_market_regime(market, storage)
+        except Exception as e:
+            logger.debug(f"大盘 regime 快照失败: {e}")
+
+    return {
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "indexes": indexes,
+        "north_money_top": north,
+        "telegraph": telegraph,
+        "regime": regime,
+    }
+
+
+def format_market_snapshot(snapshot: dict) -> str:
+    indexes = snapshot.get("indexes", [])
+    valid_pcts = [item.get("pct_change") for item in indexes if item.get("pct_change") is not None]
+    avg_pct = sum(valid_pcts) / len(valid_pcts) if valid_pcts else 0
+    tone = "偏强" if avg_pct >= 0.4 else "偏弱" if avg_pct <= -0.4 else "震荡"
+    lines = [
+        f"结论：A股主要指数当前整体{tone}，适合先看风险和量能，不要只看单日涨跌。",
+        "",
+        "指数快照：",
+    ]
+    for item in indexes:
+        close = item.get("close")
+        close_text = f"{close:.2f}" if close else "未取到"
+        ret_5d = f"{item['return_5d']:+.2f}%" if item.get("return_5d") is not None else "暂无"
+        ret_20d = f"{item['return_20d']:+.2f}%" if item.get("return_20d") is not None else "暂无"
+        lines.append(
+            f"- {item['name']} {close_text}，今日 {item.get('pct_change', 0):+.2f}%，"
+            f"5日 {ret_5d}，20日 {ret_20d}"
+        )
+    regime = snapshot.get("regime") or {}
+    if regime.get("context"):
+        lines.extend(["", f"波动状态：{regime['context']}"])
+    north = snapshot.get("north_money_top") or []
+    if north:
+        lines.append("")
+        lines.append("北向资金关注：")
+        for item in north[:5]:
+            lines.append(f"- {item.get('name', '')}({item.get('code', '')}) 净买入估计 {item.get('net_buy', 0):.2f}万")
+    telegraph = snapshot.get("telegraph") or []
+    if telegraph:
+        lines.append("")
+        lines.append("近期市场消息：")
+        for item in telegraph[:4]:
+            lines.append(f"- {item.get('date', '')} {item.get('source', '')}: {item.get('title', '')}")
+    lines.append("")
+    lines.append("仅供研究参考，不构成投资建议。")
+    return "\n".join(lines)
+
+
+def answer_market_question(question: str, market: MarketData, storage: Storage) -> str:
+    snapshot = build_market_snapshot(market, storage)
+    system_prompt = (
+        "你是给非专业家人使用的 A 股行情助手。只根据提供的数据回答，"
+        "不要编造指数点位、资金流、新闻或结论。不要给确定性买卖指令，"
+        "改用行情判断、风险提醒和观察方向。"
+    )
+    user_prompt = f"""请用中文回答用户的行情问题。
+
+用户问题：{question or "现在行情怎么样"}
+
+回答结构：
+1. 先给一句结论
+2. 说明主要指数状态
+3. 说明资金或消息面
+4. 给出短期观察点和主要风险
+不要使用 Markdown 表格。
+
+数据：
+{json.dumps(snapshot, ensure_ascii=False, indent=2)}
+"""
+    try:
+        client = get_llm_client()
+        answer = client.chat([
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt[:8000]},
+        ], temperature=0.2, max_tokens=1400)
+        answer = client._strip_think(answer).strip()
+        if answer:
+            return answer + "\n\n资料来源\n- 腾讯财经公开行情接口\n- AKShare/财联社公开资讯接口"
+    except Exception as e:
+        logger.warning(f"大盘问答降级为规则快照: {e}")
+    return format_market_snapshot(snapshot)
+
+
+def format_stock_snapshot(
+    question: str,
+    stock: StockRef,
+    market: MarketData,
+    storage: Storage,
+    include_sources: bool = True,
+) -> str:
+    quote = market.get_realtime_quote([stock.code]).get(stock.code, {})
+    name = str(quote.get("name") or stock.name or stock.code)
+    kline = _ensure_kline(stock.code, market, storage)
+    trend = build_trend_summary(kline, quote)
+    announcements = _label_items(get_announcements(stock.code, question)[:5], "公告") if include_sources else []
+    news = _label_items(get_recent_news(stock.code)[:3], "新闻") if include_sources else []
+    lines = [
+        f"结论：{name}({stock.code}) 当前可先看趋势、支撑压力和近期公告，不要只根据单日涨跌做决定。",
+        "",
+        f"最近一周走势：{trend.get('summary', '暂无')}",
+    ]
+    levels = trend.get("levels") or {}
+    if levels:
+        lines.append(
+            f"观察价位：支撑 {levels.get('support', '暂无')}，压力 {levels.get('resistance', '暂无')}。"
+        )
+    if announcements:
+        lines.append("")
+        lines.append(_format_sources(announcements, "公告"))
+    if news:
+        lines.append("")
+        lines.append(_format_sources(news, "新闻"))
+    lines.append("")
+    lines.append("仅供研究参考，不构成投资建议。")
+    return "\n".join(lines)
+
+
 def _format_sources(items: list[dict], prefix: str) -> str:
     if not items:
         return f"{prefix}: 暂无"

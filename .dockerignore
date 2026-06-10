@@ -1,8 +1,9 @@
+.git
 .venv
 __pycache__
 *.pyc
 .DS_Store
-db.sqlite
 .env
+~/.stockwatch
 models/
 reports/

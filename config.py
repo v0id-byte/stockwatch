@@ -36,6 +36,8 @@ class Config:
         return self
 
     def _validate(self):
+        if _env_bool("STOCKWATCH_SKIP_REQUIRED_CONFIG", False):
+            return
         required = [
             "MINIMAX_API_KEY",
             "FEISHU_APP_ID",

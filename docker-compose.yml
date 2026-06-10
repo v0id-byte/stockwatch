@@ -1,0 +1,39 @@
+services:
+  stockwatch:
+    build: .
+    container_name: stockwatch
+    env_file:
+      - .env
+    volumes:
+      - stockwatch-data:/root/.stockwatch
+    restart: unless-stopped
+    command: ["python", "main.py", "daemon"]
+
+  dashboard:
+    build: .
+    container_name: stockwatch-dashboard
+    environment:
+      STOCKWATCH_SKIP_REQUIRED_CONFIG: "1"
+    env_file:
+      - .env
+    volumes:
+      - stockwatch-data:/root/.stockwatch
+    ports:
+      - "8765:8765"
+    restart: unless-stopped
+    command: ["python", "main.py", "dashboard", "--host", "0.0.0.0", "--port", "8765"]
+
+  bot:
+    build: .
+    container_name: stockwatch-bot
+    profiles:
+      - bot
+    env_file:
+      - .env
+    volumes:
+      - stockwatch-data:/root/.stockwatch
+    restart: unless-stopped
+    command: ["python", "main.py", "bot"]
+
+volumes:
+  stockwatch-data:

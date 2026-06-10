@@ -211,6 +211,56 @@ def monitor_once(check_news: bool = False):
         _monitor_major_news(storage, market, feishu)
 
 
+def demo(query: str = ""):
+    """无需飞书推送的终端体验入口；MiniMax 配好时输出完整问答，否则降级为规则快照。"""
+    os.environ.setdefault("STOCKWATCH_SKIP_REQUIRED_CONFIG", "1")
+    cfg = get_config()
+    storage = Storage()
+    market = MarketData()
+    query = (query or "600519 最近一周走势如何").strip()
+
+    from bot.research import (
+        answer_market_question,
+        answer_stock_question,
+        build_market_snapshot,
+        format_market_snapshot,
+        format_stock_snapshot,
+        resolve_stock,
+    )
+
+    stock = resolve_stock(query, market)
+    try:
+        if stock and cfg.minimax_api_key:
+            answer = answer_stock_question(query, stock, market, storage)
+        elif stock:
+            answer = format_stock_snapshot(query, stock, market, storage, include_sources=False)
+        elif cfg.minimax_api_key:
+            answer = answer_market_question(query, market, storage)
+        else:
+            answer = format_market_snapshot(
+                build_market_snapshot(
+                    market, storage,
+                    include_news=False, include_north=False, include_regime=False,
+                )
+            )
+    except Exception as e:
+        logger.warning(f"demo 完整问答失败，降级输出快照: {e}")
+        if stock:
+            answer = format_stock_snapshot(query, stock, market, storage, include_sources=False)
+        else:
+            answer = format_market_snapshot(
+                build_market_snapshot(
+                    market, storage,
+                    include_news=False, include_north=False, include_regime=False,
+                )
+            )
+
+    print("=" * 40)
+    print(f"StockWatch demo: {query}")
+    print("=" * 40)
+    print(answer)
+
+
 def test():
     """测试 AKShare / MiniMax / 飞书 连接"""
     print("=" * 40)
@@ -539,7 +589,7 @@ def daemon():
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python main.py [test|once|daemon|bot]")
+        print("Usage: python main.py [test|once|daemon|monitor|bot|demo|dashboard|report]")
         sys.exit(1)
 
     mode = sys.argv[1]
@@ -556,5 +606,15 @@ if __name__ == "__main__":
         _setup_log()
         from bot.runner import run_bot
         run_bot()
+    elif mode == "demo":
+        demo(" ".join(sys.argv[2:]))
+    elif mode == "dashboard":
+        os.environ.setdefault("STOCKWATCH_SKIP_REQUIRED_CONFIG", "1")
+        from dashboard import main as dashboard_main
+        raise SystemExit(dashboard_main(sys.argv[2:]))
+    elif mode == "report":
+        os.environ.setdefault("STOCKWATCH_SKIP_REQUIRED_CONFIG", "1")
+        from analysis.report import main as report_main
+        raise SystemExit(report_main(sys.argv[2:]))
     else:
         print(f"Unknown mode: {mode}")
