@@ -2,6 +2,29 @@
 
 > 在树莓派5上运行，每日3次飞书推送，为非技术用户（我母亲）提供买卖建议。
 
+[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB)](https://www.python.org/)
+[![LightGBM](https://img.shields.io/badge/LightGBM-ranking-00A35C)](https://github.com/microsoft/LightGBM)
+[![AKShare](https://img.shields.io/badge/Data-AKShare-blue)](https://github.com/akfamily/akshare)
+[![Feishu](https://img.shields.io/badge/Bot-Feishu%2FLark-00D6B9)](https://github.com/larksuite/oapi-sdk-python)
+
+**关键词**：A股量化、股票盯盘、股票机器人、飞书机器人、A股新闻分析、股票公告解读、LightGBM 排序模型、Alpha158 因子、AKShare、树莓派部署。
+
+StockWatch 是一个面向 A 股个人投资辅助场景的轻量级系统：用 AKShare、腾讯财经等数据源获取行情/新闻/公告，结合技术面、消息面、Alpha 因子和 LightGBM 排序模型，最终通过飞书机器人给出“偏向建议 + 风险提醒 + 观察价位”的中文解释。
+
+> 仅供学习、研究和家庭辅助决策使用，不构成任何投资建议。
+
+---
+
+## 功能亮点
+
+- **A股盯盘推送**：按早盘前、午间、收盘后自动运行，非交易日跳过。
+- **飞书交互式查询**：支持股票代码、股票名称、买入跟踪、盯价、取消盯价等自然输入。
+- **深度问答**：可回答“600449 最近一周走势如何”“宁夏建材重组怎么样”等问题，并优先引用公告/新闻来源。
+- **消息面分析**：抓取近况新闻、公司公告、研报、资金流、财务快照和市场关注信息，交给模型生成可读建议。
+- **量化因子**：计算扩展版 Alpha158/Alpha300 风格因子，覆盖动量、波动、Beta、流动性冲击、相对强弱、回撤和成交量结构。
+- **LightGBM 排序模型**：离线训练 A 股横截面排序模型，线上作为辅助信号参与解释。
+- **树莓派部署**：systemd 常驻服务 + SQLite 本地存储，适合低成本 24 小时运行。
+
 ---
 
 ## 快速开始
@@ -91,11 +114,16 @@ sqlite3 ~/.stockwatch/db.sqlite "SELECT run_id, code, name, action, confidence, 
 600519
 买入 600519 1680
 买入 600519 1680 100股
+盯买 600519 1500
+盯买 600519 1500 100股
+取消盯价 600519
 卖出 600519
 停止跟踪 600519
 ```
 
 `股票代码` 会即时回复单只股票分析；`买入` 会写入持仓跟踪，后续定时盯盘会把这只股票加入分析池，触发止损、接近目标价或模型转为 SELL 时主动推送；`卖出` 会停止跟踪。
+
+`盯买` 会设置加仓价提醒。盘中轻量监控每 5 分钟检查一次，触价时会结合五档盘口和内外盘判断卖压；如果卖压偏重，会提示先别急着加仓或考虑撤挂单。系统也会每 30 分钟扫描自选股、持仓和盯价股的重大新闻，避免重复提醒。
 
 ---
 
@@ -151,6 +179,57 @@ scp models/lgbm.* pi@<rpi_ip>:~/.stockwatch/models/
 ```
 
 树莓派推理端只在 `ENABLE_LGBM=true` 时加载模型；模型缺失会记录日志并跳过。
+
+当前默认训练配置使用 `stable` 因子子集，聚焦历史验证中更稳定的流动性冲击、Beta、阶段位置、相对动量和波动类因子。如需回到全量因子训练：
+
+```bash
+STOCKWATCH_LGBM_FEATURE_SET=all python scripts/train_lgbm.py
+```
+
+---
+
+## 数据与模型说明
+
+- 行情数据主要来自 AKShare 封装的数据接口和腾讯财经公开行情接口。
+- 公告/新闻/研报等信息会优先参考巨潮资讯公告、东方财富公告/新闻/研报/资金流等公开来源。
+- LightGBM 模型以离线历史数据训练，默认标签为 20 日前瞻收益并加入回撤惩罚，线上只作为辅助排序信号。
+- 模型输出不是买卖指令；最终回复会结合价格、趋势、消息面、风险位和观察价位综合表达。
+
+---
+
+## 开源引用与致谢
+
+StockWatch 站在这些开源项目之上。以下列出直接依赖或训练/运行中明确使用的主要仓库：
+
+| 项目 | 用途 | 许可证 |
+| --- | --- | --- |
+| [Microsoft Qlib](https://github.com/microsoft/qlib) | Alpha158 因子命名和量化研究范式的概念参考；本项目为独立 pandas 实现 | MIT |
+| [AKShare](https://github.com/akfamily/akshare) | A 股行情、新闻、公告、资金流、板块和财务数据接口 | MIT |
+| [LightGBM](https://github.com/microsoft/LightGBM) | LambdaRank 横截面排序模型训练与推理 | MIT |
+| [pandas](https://github.com/pandas-dev/pandas) | 表格数据处理、时间序列和训练集构建 | BSD-3-Clause |
+| [NumPy](https://github.com/numpy/numpy) | 数值计算和因子计算 | BSD-3-Clause |
+| [scikit-learn](https://github.com/scikit-learn/scikit-learn) | NDCG 等模型评估指标 | BSD-3-Clause |
+| [Apache Arrow / pyarrow](https://github.com/apache/arrow) | Parquet 训练数据读写 | Apache-2.0 |
+| [OpenAI Python SDK](https://github.com/openai/openai-python) | OpenAI 兼容接口客户端，当前用于接入 MiniMax API | Apache-2.0 |
+| [Lark/Feishu OpenAPI Python SDK](https://github.com/larksuite/oapi-sdk-python) | 飞书长连接机器人和开放平台 SDK | MIT |
+| [Requests](https://github.com/psf/requests) | HTTP 请求 | Apache-2.0 |
+| [urllib3](https://github.com/urllib3/urllib3) | HTTP 连接池基础库 | MIT |
+| [Loguru](https://github.com/Delgan/loguru) | 日志系统 | MIT |
+| [Tenacity](https://github.com/jd/tenacity) | LLM/API 调用重试 | Apache-2.0 |
+| [python-dotenv](https://github.com/theskumar/python-dotenv) | `.env` 配置加载 | BSD-3-Clause |
+| [tqdm](https://github.com/tqdm/tqdm) | 训练/下载进度条 | MPL-2.0 / MIT |
+
+这里的“引用”包含直接依赖和明确概念参考；StockWatch 与上述项目维护者没有隶属、背书或商业合作关系。各项目版权和许可证归原作者所有。
+
+## 数据与服务声明
+
+- 腾讯财经、巨潮资讯、东方财富、飞书开放平台、MiniMax 等属于各自公司或机构提供的数据/服务来源，不是本仓库的开源组成部分。
+- 本项目不会重新分发第三方行情、公告、新闻或研报原文；运行时数据获取应遵守对应平台的服务条款、robots/接口限制和适用法律法规。
+- 模型分析可能存在延迟、缺失、误判或源数据错误，不应作为自动交易或唯一投资依据。
+
+## 免责声明
+
+本项目仅用于个人学习、量化研究和家庭辅助提醒。股票市场有风险，任何模型、因子、新闻摘要或 LLM 回复都可能出错。使用者应自行核验公告、财报、交易所披露和券商/交易系统信息，并自行承担投资决策后果。
 
 ---
 
