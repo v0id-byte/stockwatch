@@ -93,6 +93,7 @@ LLM_PROVIDER=openai
 LLM_API_KEY=sk-xxxx
 LLM_BASE_URL=https://api.example.com/v1
 LLM_MODEL=your-model-name
+AI_RESPONSE_STYLE=balanced
 ```
 
 Anthropic 示例：
@@ -161,7 +162,7 @@ systemctl status stockwatch
 # 飞书交互式查询机器人（SDK 长连接）
 python main.py bot
 
-# 本地只读 Dashboard
+# 本地 Web 控制台
 python main.py dashboard
 
 # 生成信号复盘报告
@@ -215,7 +216,7 @@ sqlite3 ~/.stockwatch/db.sqlite "SELECT run_id, code, name, action, confidence, 
 
 ---
 
-## 本地 Dashboard
+## 本地 Web 控制台
 
 ```bash
 python main.py dashboard
@@ -223,13 +224,16 @@ python main.py dashboard
 
 默认地址：`http://127.0.0.1:8765`。
 
-Dashboard 是只读页面，直接读取本地 SQLite，展示：
+Web 控制台直接读取本地 SQLite，并提供本地配置入口，可用于：
 
 - 最近运行记录
 - 最近信号和置信度
 - 活跃持仓跟踪
 - 活跃盯价提醒
 - 5 日信号复盘摘要
+- 自选股、模型接口/API Key、功能开关、AI 回复风格和因子开关配置
+
+保存配置会写入本地 `.env`；已运行的守护进程或飞书 Bot 通常需要重启后读取新配置。
 
 如果用 Docker：
 
@@ -596,7 +600,7 @@ docker compose up -d stockwatch dashboard
 # Optional Feishu/Lark long-connection bot
 docker compose --profile bot up -d
 
-# Open the dashboard
+# Open the web console
 open http://127.0.0.1:8765
 ```
 
@@ -626,7 +630,7 @@ sqlite3 ~/.stockwatch/db.sqlite "SELECT * FROM runs ORDER BY run_ts DESC LIMIT 5
 sqlite3 ~/.stockwatch/db.sqlite "SELECT run_id, code, name, action, confidence, pushed FROM decisions ORDER BY run_ts DESC LIMIT 20;"
 ```
 
-### Local Dashboard
+### Local Web Console
 
 ```bash
 python main.py dashboard
@@ -634,7 +638,7 @@ python main.py dashboard
 
 Default URL: `http://127.0.0.1:8765`.
 
-The dashboard is read-only and reads directly from the local SQLite database. It shows recent runs, recent signals, active tracked positions, active price alerts and a five-trading-day signal review summary.
+The web console reads the local SQLite database and provides local settings pages for the watchlist, model endpoint/API key, feature toggles, AI response style and factor switches. Saved settings are written to the local `.env`; already-running daemon or bot processes usually need a restart before they read the new values.
 
 With Docker:
 

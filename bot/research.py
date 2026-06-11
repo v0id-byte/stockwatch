@@ -16,6 +16,7 @@ from loguru import logger
 import akshare as ak
 
 from analysis.technical import compute_tech_score
+from config import get_config
 from data.market import MarketData
 from data.news import NewsData
 from utils.llm import get_llm_client
@@ -33,6 +34,20 @@ _FINANCE_FIELDS = {
     "ROEJQ": "净资产收益率",
     "XSMLL": "销售毛利率",
     "ZCFZL": "资产负债率",
+}
+
+_RESPONSE_STYLE_INSTRUCTIONS = {
+    "concise": "回复风格：精简。控制在 3-5 个短段落，优先告诉用户现在要不要看、看什么风险。",
+    "balanced": "回复风格：均衡。先讲结论，再给必要依据和风险，不展开过多术语。",
+    "detailed": "回复风格：详细。保留完整结构，适当解释技术面、资金面、公告和风险。",
+    "expert": "回复风格：专家视角。保留完整结构，增加中线趋势、量价、情绪和数据可信度判断，但避免确定性买卖指令。",
+}
+
+_RESPONSE_STYLE_MAX_TOKENS = {
+    "concise": 900,
+    "balanced": 1600,
+    "detailed": 2200,
+    "expert": 2400,
 }
 
 
@@ -66,6 +81,17 @@ def _safe_float(value) -> float | None:
     except (TypeError, ValueError):
         return None
     return num if math.isfinite(num) else None
+
+
+def _response_style() -> tuple[str, int]:
+    try:
+        style = get_config().ai_response_style
+    except Exception:
+        style = "balanced"
+    return (
+        _RESPONSE_STYLE_INSTRUCTIONS.get(style, _RESPONSE_STYLE_INSTRUCTIONS["balanced"]),
+        _RESPONSE_STYLE_MAX_TOKENS.get(style, _RESPONSE_STYLE_MAX_TOKENS["balanced"]),
+    )
 
 
 def _market_prefix(code: str) -> str:
@@ -519,10 +545,11 @@ def format_market_snapshot(snapshot: dict) -> str:
 
 def answer_market_question(question: str, market: MarketData, storage: Storage) -> str:
     snapshot = build_market_snapshot(market, storage)
+    style_instruction, max_tokens = _response_style()
     system_prompt = (
         "你是给非专业家人使用的 A 股行情助手。只根据提供的数据回答，"
         "不要编造指数点位、资金流、新闻或结论。不要给确定性买卖指令，"
-        "改用行情判断、风险提醒和观察方向。"
+        f"改用行情判断、风险提醒和观察方向。{style_instruction}"
     )
     user_prompt = f"""请用中文回答用户的行情问题。
 
@@ -534,6 +561,7 @@ def answer_market_question(question: str, market: MarketData, storage: Storage) 
 3. 说明资金或消息面
 4. 给出短期观察点和主要风险
 不要使用 Markdown 表格。
+{style_instruction}
 
 数据：
 {json.dumps(snapshot, ensure_ascii=False, indent=2)}
@@ -543,7 +571,7 @@ def answer_market_question(question: str, market: MarketData, storage: Storage) 
         answer = client.chat([
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt[:8000]},
-        ], temperature=0.2, max_tokens=1400)
+        ], temperature=0.2, max_tokens=max_tokens)
         answer = client._strip_think(answer).strip()
         if answer:
             return answer + "\n\n资料来源\n- 腾讯财经公开行情接口\n- AKShare/财联社公开资讯接口"
@@ -629,10 +657,11 @@ def answer_stock_question(question: str, stock: StockRef, market: MarketData, st
         "reference_context": reference_context,
         "source_priority": "公告优先级: 巨潮资讯公告 > 东方财富公告大全 > 个股新闻 > 资金流/研报/财务/市场关注。",
     }
+    style_instruction, max_tokens = _response_style()
     system_prompt = (
         "你是给非专业家人使用的 A 股研究助手。只根据用户问题和提供的数据回答，"
         "不要编造未提供的公告、新闻、价格或结论。可以用均线、MACD、RSI、布林位置等指标佐证，"
-        "但必须翻译成普通人能理解的话。不要给确定性买卖指令，改用“偏向建议 + 风险提醒 + 观察价位”。"
+        f"但必须翻译成普通人能理解的话。不要给确定性买卖指令，改用“偏向建议 + 风险提醒 + 观察价位”。{style_instruction}"
     )
     user_prompt = f"""请用中文回答下面的股票问题。
 
@@ -645,6 +674,7 @@ def answer_stock_question(question: str, stock: StockRef, market: MarketData, st
 6. “偏向建议”：用谨慎措辞，给观察价位/支撑压力，不要承诺收益
 7. “主要风险”：列 2-4 条
 不要使用 Markdown 表格或分隔线，飞书卡片里只用短段落和项目符号。
+{style_instruction}
 
 引用要求：
 - 公告和新闻必须使用数据里 label 字段对应的编号，比如 [公告1]、[新闻1]。
@@ -658,7 +688,7 @@ def answer_stock_question(question: str, stock: StockRef, market: MarketData, st
     answer = client.chat([
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt[:9000]},
-    ], temperature=0.2, max_tokens=1800)
+    ], temperature=0.2, max_tokens=max_tokens)
     answer = client._strip_think(answer).strip()
     if not answer:
         raise RuntimeError("模型没有返回分析内容")

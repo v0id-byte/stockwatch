@@ -95,7 +95,8 @@ class Config:
     def llm_allows_empty_key(self) -> bool:
         host = self.llm_base_url.lower()
         local_hosts = ("http://localhost", "http://127.0.0.1", "http://0.0.0.0")
-        return self.llm_provider == "openai" and host.startswith(local_hosts)
+        openai_like = {"openai", "openai-compatible", "custom", "local", "minimax"}
+        return self.llm_provider in openai_like and host.startswith(local_hosts)
 
     @property
     def llm_api_key_or_placeholder(self) -> str:
@@ -198,6 +199,13 @@ class Config:
 
     def alert_level_enabled(self, level: str) -> bool:
         return str(level or "info").lower() in self.alert_levels
+
+    @property
+    def ai_response_style(self) -> str:
+        value = os.getenv("AI_RESPONSE_STYLE", "balanced").strip().lower()
+        if value in {"concise", "balanced", "detailed", "expert"}:
+            return value
+        return "balanced"
 
     # === v2 feature flags（默认关闭） ===
     @property
