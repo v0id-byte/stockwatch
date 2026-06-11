@@ -19,19 +19,19 @@ StockWatch — an A-share alert bot that helps your family stop staring at stock
 中文短版：
 
 ```text
-一个跑在树莓派/NAS/服务器上的 A 股家庭盯盘助手：自动看自选股、持仓风险、盯价、公告新闻和盘面异动，只在值得看的时候通过飞书提醒。
+一个跑在树莓派/NAS/服务器上的 A 股家庭盯盘助手：自动看自选股、持仓风险、盯价、公告新闻和盘面异动，只在值得看的时候通过 Web 控制台或飞书提醒。
 ```
 
 中文完整：
 
 ```text
-StockWatch 不是荐股软件，也不是自动交易工具。它更像一个家庭盯盘助手：把自选股、买入价和盯价告诉它，它会定时分析行情、公告、新闻、资金流、技术面和持仓风险；如果跌破止损、接近目标价、出现重大消息或盘面异动，再通过飞书提醒你去看。目标是减少无意义盯盘，而不是替代人的投资判断。
+StockWatch 不是荐股软件，也不是自动交易工具。它更像一个家庭盯盘助手：把自选股、买入价和盯价告诉它，它会定时分析行情、公告、新闻、资金流、技术面和持仓风险；如果跌破止损、接近目标价、出现重大消息或盘面异动，再通过 Web 控制台或飞书提醒你去看。目标是减少无意义盯盘，而不是替代人的投资判断。
 ```
 
 English:
 
 ```text
-A personal A-share watchlist and alert bot for family use. It monitors prices, announcements, news, fund flow, technical signals and tracked positions, then sends Feishu/Lark alerts only when something deserves attention.
+A personal A-share watchlist and alert bot for family use. It monitors prices, announcements, news, fund flow, technical signals and tracked positions, then surfaces them in the local web console or sends Feishu/Lark alerts only when something deserves attention.
 ```
 
 ## 小红书文案
@@ -70,7 +70,7 @@ A personal A-share watchlist and alert bot for family use. It monitors prices, a
 
 它不替你买卖，只提醒你什么时候值得看一眼。
 
-现在项目已经开源，适合会一点 Python、飞书机器人、树莓派/NAS/服务器部署的人折腾。仅供学习和家庭辅助提醒，不构成投资建议。
+现在项目已经开源，Web 控制台里可以直接问行情、控制盯盘，也可以继续接飞书；适合会一点 Python、树莓派/NAS/服务器部署的人折腾。仅供学习和家庭辅助提醒，不构成投资建议。
 ```
 
 标签建议：
@@ -105,6 +105,7 @@ A personal A-share watchlist and alert bot for family use. It monitors prices, a
 - AKShare + 腾讯财经公开行情接口
 - 巨潮资讯/东方财富公告新闻等公开数据源
 - OpenAI-compatible / Anthropic / 本地模型 LLM 接口
+- 本地 Web 控制台
 - 飞书/Lark 自建应用机器人
 - 可选 Alpha158 风格因子和 LightGBM 排序模型
 - systemd 或 Docker Compose 部署
@@ -112,12 +113,13 @@ A personal A-share watchlist and alert bot for family use. It monitors prices, a
 当前能力：
 
 - 早盘/午盘/收盘定时分析自选股
-- 飞书自然语言问答，例如“600519 最近一周走势如何”
+- Web 控制台或飞书自然语言问答，例如“600519 最近一周走势如何”
 - 大盘问答，例如“现在行情怎么样”
 - 买入后持仓跟踪，触发止损、接近目标价、模型转弱时提醒
 - 盯价提醒，触价时顺带看盘口卖压
 - 重大公告/新闻提醒
-- 本地只读 Dashboard
+- 本地 Web 控制台，可直接提问、设置盯盘、配置模型/渠道/开关
+- 自定义因子上传，本地保存为社区贡献包
 - 基于历史决策和 K 线的信号复盘报告
 - 安心模式：无重大风险时，收盘后发“今天不用盯盘”的总结
 - 提醒等级过滤：用户可以只看 critical/warning，过滤普通 info

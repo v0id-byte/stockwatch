@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import argparse
+import email.policy
 import html
 import json
 import os
 import re
 import sqlite3
 from datetime import datetime
+from email.parser import BytesParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -18,9 +20,13 @@ from utils.storage import Storage
 
 PROJECT_DIR = Path(__file__).resolve().parent
 ENV_PATH = PROJECT_DIR / ".env"
+CUSTOM_FACTORS_DIR = Path.home() / ".stockwatch" / "custom_factors"
 _ENV_ASSIGN_RE = re.compile(r"^(\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*=\s*)(.*?)(\r?\n)?$")
+WEB_USER_ID = "web-ui"
+WEB_CHAT_ID = "web-ui"
 
 DEFAULT_SETTINGS = {
+    "NOTIFY_CHANNEL": "feishu",
     "LLM_PROVIDER": "openai",
     "LLM_API_KEY": "",
     "LLM_BASE_URL": "https://api.minimaxi.com/v1",
@@ -38,6 +44,13 @@ DEFAULT_SETTINGS = {
     "ENABLE_LGBM": "false",
     "ENABLE_REGIME": "false",
     "ENABLE_SECTOR": "false",
+    "FEISHU_APP_ID": "",
+    "FEISHU_APP_SECRET": "",
+    "FEISHU_RECEIVE_ID": "",
+    "FEISHU_RECEIVE_ID_TYPE": "open_id",
+    "FEISHU_RECEIVE_ID_2": "",
+    "FEISHU_VERIFICATION_TOKEN": "",
+    "FEISHU_ENCRYPT_KEY": "",
 }
 
 
@@ -124,6 +137,163 @@ def save_settings(updates: dict[str, str]) -> None:
     ENV_PATH.write_text("".join(next_lines), encoding="utf-8")
     for key, value in cleaned.items():
         os.environ[key] = value
+
+
+def _safe_filename(raw: str, fallback: str = "factor.py") -> str:
+    name = Path(raw or fallback).name
+    name = re.sub(r"[^A-Za-z0-9_.-]+", "-", name).strip(".-")
+    return name[:96] or fallback
+
+
+def _parse_form_data(headers, body: bytes) -> tuple[dict[str, list[str]], dict[str, tuple[str, bytes]]]:
+    content_type = headers.get("Content-Type", "")
+    if content_type.startswith("multipart/form-data"):
+        raw = (
+            f"Content-Type: {content_type}\n"
+            "MIME-Version: 1.0\n\n"
+        ).encode("utf-8") + body
+        message = BytesParser(policy=email.policy.default).parsebytes(raw)
+        fields: dict[str, list[str]] = {}
+        files: dict[str, tuple[str, bytes]] = {}
+        for part in message.iter_parts():
+            name = part.get_param("name", header="content-disposition")
+            if not name:
+                continue
+            filename = part.get_filename()
+            payload = part.get_payload(decode=True) or b""
+            if filename:
+                files[name] = (_safe_filename(filename), payload)
+            else:
+                charset = part.get_content_charset() or "utf-8"
+                fields.setdefault(name, []).append(payload.decode(charset, errors="replace"))
+        return fields, files
+    params = parse_qs(body.decode("utf-8"), keep_blank_values=True)
+    return params, {}
+
+
+def _factor_slug(name: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9_-]+", "-", name.strip()).strip("-").lower()
+    return slug[:48] or "custom-factor"
+
+
+def save_custom_factor(params: dict[str, list[str]], files: dict[str, tuple[str, bytes]]) -> str:
+    filename, payload = files.get("factor_file", ("", b""))
+    if not filename or not payload:
+        raise ValueError("请选择要上传的因子文件")
+    if len(payload) > 512 * 1024:
+        raise ValueError("因子文件不能超过 512KB")
+    suffix = Path(filename).suffix.lower()
+    if suffix not in {".py", ".json", ".md", ".txt"}:
+        raise ValueError("仅支持 .py / .json / .md / .txt 因子文件")
+
+    name = _first(params, "factor_name", Path(filename).stem).strip() or Path(filename).stem
+    description = _first(params, "factor_description").strip()
+    license_name = _first(params, "factor_license", "MIT").strip() or "MIT"
+    share = _bool_param(params, "share_to_community") == "true"
+    CUSTOM_FACTORS_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    target_name = f"{stamp}_{_factor_slug(name)}_{filename}"
+    target = CUSTOM_FACTORS_DIR / target_name
+    target.write_bytes(payload)
+    manifest = {
+        "name": name,
+        "description": description,
+        "license": license_name,
+        "share_to_community": share,
+        "status": "contribution_ready" if share else "local_draft",
+        "file": str(target),
+        "uploaded_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    manifest_path = target.with_name(target.name + ".manifest.json")
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    return f"因子已保存到 {target}"
+
+
+def load_custom_factors() -> list[dict]:
+    if not CUSTOM_FACTORS_DIR.exists():
+        return []
+    items = []
+    for path in sorted(CUSTOM_FACTORS_DIR.glob("*.manifest.json"), reverse=True):
+        try:
+            item = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+        item["_manifest"] = str(path)
+        items.append(item)
+    return items[:40]
+
+
+def _card_to_result(card: dict) -> dict:
+    title = (((card.get("header") or {}).get("title") or {}).get("content") or "StockWatch")
+    parts = []
+    for element in card.get("elements", []):
+        text = element.get("text") or {}
+        if text.get("content"):
+            parts.append(str(text["content"]))
+    return {"title": title, "text": "\n".join(parts), "ok": True}
+
+
+def _error_result(message: str) -> dict:
+    return {"title": "操作失败", "text": message, "ok": False}
+
+
+def _run_web_command(text: str, storage: Storage) -> dict:
+    text = (text or "").strip()
+    if not text:
+        return _error_result("请输入问题或控制命令")
+    try:
+        from bot.parser import help_lines, parse_command
+        from bot.service import BotService
+        from push.feishu import render_text_card
+
+        service = BotService(storage)
+        command = parse_command(text)
+        if command.action == "help":
+            return _card_to_result(render_text_card("Web 控制台帮助", help_lines()))
+        if command.action == "query":
+            return _card_to_result(service.query_stock(command.code))
+        if command.action == "research":
+            return _card_to_result(service.research_stock(command.text or text, command.code))
+        if command.action == "buy":
+            if not command.price:
+                return _error_result("开始跟踪需要买入价，例如：买入 600519 1680")
+            return _card_to_result(service.open_position(WEB_USER_ID, WEB_CHAT_ID, command.code, command.price, command.quantity))
+        if command.action == "sell":
+            return _card_to_result(service.close_position(WEB_USER_ID, command.code))
+        if command.action == "price_alert":
+            if not command.price:
+                return _error_result("盯价需要目标价，例如：盯买 600519 1500")
+            return _card_to_result(service.open_price_alert(WEB_USER_ID, WEB_CHAT_ID, command.code, command.price, command.quantity))
+        if command.action == "cancel_price_alert":
+            return _card_to_result(service.cancel_price_alert(WEB_USER_ID, command.code))
+        return _error_result("暂不支持这个命令")
+    except Exception as exc:
+        return _error_result(str(exc))
+
+
+def _run_web_action(params: dict[str, list[str]], storage: Storage) -> dict:
+    action = _first(params, "console_action")
+    if action == "track_position":
+        command = " ".join(filter(None, [
+            "买入",
+            _first(params, "code"),
+            _first(params, "price"),
+            _first(params, "quantity"),
+        ]))
+        return _run_web_command(command, storage)
+    if action == "price_alert":
+        command = " ".join(filter(None, [
+            "盯买",
+            _first(params, "code"),
+            _first(params, "price"),
+            _first(params, "quantity"),
+        ]))
+        return _run_web_command(command, storage)
+    if action == "close_position":
+        return _run_web_command(f"停止跟踪 {_first(params, 'code')}", storage)
+    if action == "cancel_price_alert":
+        return _run_web_command(f"取消盯价 {_first(params, 'code')}", storage)
+    return _run_web_command(_first(params, "question"), storage)
 
 
 def load_dashboard_data(storage: Storage) -> dict:
@@ -323,15 +493,17 @@ def _field(label: str, control: str, hint: str = "", wide: bool = False) -> str:
     return f"<label class='{cls}'><span>{_e(label)}</span>{control}{hint_html}</label>"
 
 
-def _save_button() -> str:
-    return "<div class='actions'><button type='submit'>保存设置</button></div>"
+def _save_button(label: str = "保存设置") -> str:
+    return f"<div class='actions'><button type='submit'>{_e(label)}</button></div>"
 
 
 def _nav(active: str) -> str:
     items = [
         ("home", "/", "主页"),
+        ("console", "/console", "AI 控制台"),
         ("watchlist", "/settings/watchlist", "自选股"),
         ("model", "/settings/model", "模型配置"),
+        ("channels", "/settings/channels", "通知渠道"),
         ("features", "/settings/features", "功能开关"),
         ("personalization", "/settings/personalization", "个性化"),
         ("factors", "/settings/factors", "因子市场"),
@@ -448,6 +620,20 @@ def _layout(active: str, title: str, subtitle: str, content: str,
     textarea {{ min-height: 168px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }}
     .hint {{ color: var(--muted); font-size: 12px; }}
     .options {{ display: grid; gap: 10px; margin-top: 8px; }}
+    .console-grid {{ display: grid; grid-template-columns: minmax(280px, 1fr) minmax(280px, 0.9fr); gap: 16px; align-items: start; }}
+    .result {{
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel-soft);
+    }}
+    .result.ok {{ border-color: #b8dcc8; }}
+    .result.error {{ border-color: #e6b7b0; background: #fff7f5; }}
+    .mini-grid {{ display: grid; grid-template-columns: repeat(2, minmax(160px, 1fr)); gap: 10px; }}
+    .note-list {{ margin: 8px 0 0; padding-left: 18px; color: var(--muted); }}
+    .path {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; overflow-wrap: anywhere; }}
     .option-row, .segment-row {{
       display: flex;
       align-items: center;
@@ -502,7 +688,7 @@ def _layout(active: str, title: str, subtitle: str, content: str,
       .shell {{ display: block; }}
       aside {{ width: auto; border-right: 0; border-bottom: 1px solid var(--line); }}
       nav {{ grid-template-columns: repeat(3, 1fr); }}
-      .form-grid, .segments {{ grid-template-columns: 1fr; }}
+      .form-grid, .segments, .console-grid, .mini-grid {{ grid-template-columns: 1fr; }}
     }}
   </style>
 </head>
@@ -538,6 +724,64 @@ def render_home(data: dict, settings: dict[str, str], notice: str = "") -> str:
     <footer>仅供研究复盘，不构成投资建议。数据来自本地 SQLite 记录。</footer>
     """
     return _layout("home", "主页", f"更新时间 {_e(data['generated_at'])}", content, settings, notice)
+
+
+def render_console(storage: Storage, settings: dict[str, str], result: dict | None = None,
+                   question: str = "", notice: str = "") -> str:
+    data = load_dashboard_data(storage)
+    result_html = ""
+    if result:
+        cls = "ok" if result.get("ok") else "error"
+        result_html = (
+            f"<section><h2>{_e(result.get('title'))}</h2>"
+            f"<div class='result {cls}'>{_e(result.get('text'))}</div></section>"
+        )
+    content = f"""
+    <div class="console-grid">
+      <section class="panel">
+        <h2>直接提问</h2>
+        <form method="post" action="/console">
+          {_field("问题或命令", f"<textarea name='question' placeholder='例如：现在行情怎么样 / 600519 最近怎么样 / 盯买 600519 1500'>{_e(question)}</textarea>", wide=True)}
+          {_save_button("发送")}
+        </form>
+      </section>
+      <section class="panel">
+        <h2>盯盘控制</h2>
+        <form method="post" action="/console" class="options">
+          <input type="hidden" name="console_action" value="track_position">
+          <div class="mini-grid">
+            <input name="code" placeholder="代码 600519">
+            <input name="price" placeholder="买入价">
+            <input name="quantity" placeholder="数量，可选">
+          </div>
+          <button type="submit">开始持仓跟踪</button>
+        </form>
+        <form method="post" action="/console" class="options">
+          <input type="hidden" name="console_action" value="price_alert">
+          <div class="mini-grid">
+            <input name="code" placeholder="代码 600519">
+            <input name="price" placeholder="触发价">
+            <input name="quantity" placeholder="数量，可选">
+          </div>
+          <button type="submit">新增盯价提醒</button>
+        </form>
+        <form method="post" action="/console" class="options">
+          <input type="hidden" name="console_action" value="close_position">
+          <input name="code" placeholder="代码 600519">
+          <button type="submit">停止持仓跟踪</button>
+        </form>
+        <form method="post" action="/console" class="options">
+          <input type="hidden" name="console_action" value="cancel_price_alert">
+          <input name="code" placeholder="代码 600519">
+          <button type="submit">取消盯价提醒</button>
+        </form>
+      </section>
+    </div>
+    {result_html}
+    {_positions_table(data['positions'])}
+    {_alerts_table(data['price_alerts'])}
+    """
+    return _layout("console", "AI 控制台", "网页里直接问行情、查股票和控制盯盘", content, settings, notice)
 
 
 def render_watchlist_settings(settings: dict[str, str], notice: str = "") -> str:
@@ -581,6 +825,48 @@ def render_model_settings(settings: dict[str, str], notice: str = "") -> str:
     </section>
     """
     return _layout("model", "模型配置", "配置任意模型服务或本地模型", content, settings, notice)
+
+
+def render_channel_settings(settings: dict[str, str], notice: str = "") -> str:
+    channel_select = _select("notify_channel", settings.get("NOTIFY_CHANNEL", "feishu"), [
+        ("feishu", "飞书/Lark"),
+        ("web", "仅 Web 控制台"),
+    ])
+    receive_type = _select("feishu_receive_id_type", settings.get("FEISHU_RECEIVE_ID_TYPE", "open_id"), [
+        ("open_id", "open_id"),
+        ("user_id", "user_id"),
+        ("email", "email"),
+        ("chat_id", "chat_id"),
+    ])
+    content = f"""
+    <section class="panel">
+      <h2>通知渠道</h2>
+      <form method="post" action="/settings/channels">
+        <div class="form-grid">
+          {_field("当前渠道", channel_select, "以后可以在这里接企业微信、钉钉、Telegram 或自定义 Webhook")}
+          {_field("接收 ID 类型", receive_type)}
+          {_field("App ID", f"<input name='feishu_app_id' value='{_e(settings.get('FEISHU_APP_ID', ''))}' placeholder='cli_xxxxxxxxxx'>")}
+          {_field("App Secret", f"<input type='password' name='feishu_app_secret' placeholder='留空不修改，当前：{_e(_mask_secret(settings.get('FEISHU_APP_SECRET', '')))}'>")}
+          {_field("接收人 ID", f"<input name='feishu_receive_id' value='{_e(settings.get('FEISHU_RECEIVE_ID', ''))}' placeholder='open_id / user_id / email / chat_id'>")}
+          {_field("备用接收人", f"<input name='feishu_receive_id_2' value='{_e(settings.get('FEISHU_RECEIVE_ID_2', ''))}' placeholder='可选'>")}
+          {_field("事件订阅 Token", f"<input type='password' name='feishu_verification_token' placeholder='留空不修改，当前：{_e(_mask_secret(settings.get('FEISHU_VERIFICATION_TOKEN', '')))}'>")}
+          {_field("事件订阅 Encrypt Key", f"<input type='password' name='feishu_encrypt_key' placeholder='留空不修改，当前：{_e(_mask_secret(settings.get('FEISHU_ENCRYPT_KEY', '')))}'>")}
+        </div>
+        {_save_button()}
+      </form>
+    </section>
+    <section class="panel">
+      <h2>飞书注意事项</h2>
+      <ul class="note-list">
+        <li>在飞书开放平台创建自建应用，保存 App ID 和 App Secret。</li>
+        <li>发送卡片消息需要开通发送消息相关权限，例如 im:message:send_as_bot。</li>
+        <li>如果要用飞书长连接机器人接收用户消息，需要配置事件订阅，并订阅接收消息事件。</li>
+        <li>修改权限后需要发布/重新安装应用到目标企业或群聊。</li>
+        <li><a href="https://open.feishu.cn/document/server-docs/im-v1/message/create?lang=zh-CN">飞书发送消息接口文档</a></li>
+      </ul>
+    </section>
+    """
+    return _layout("channels", "通知渠道", "配置飞书或切换为仅 Web 控制台", content, settings, notice)
 
 
 def render_feature_settings(settings: dict[str, str], notice: str = "") -> str:
@@ -636,6 +922,17 @@ def render_personalization_settings(settings: dict[str, str], notice: str = "") 
 
 
 def render_factor_settings(settings: dict[str, str], notice: str = "") -> str:
+    custom_rows = "".join(
+        "<tr>"
+        f"<td>{_e(item.get('uploaded_at'))}</td>"
+        f"<td>{_e(item.get('name'))}</td>"
+        f"<td>{_e(item.get('license'))}</td>"
+        f"<td>{_e('准备贡献' if item.get('share_to_community') else '本地草稿')}</td>"
+        f"<td class='path'>{_e(item.get('file'))}</td>"
+        "</tr>"
+        for item in load_custom_factors()
+    )
+    upload_table = _table("已上传因子", ["时间", "名称", "协议", "状态", "文件"], custom_rows)
     content = f"""
     <section class="panel">
       <h2>因子市场</h2>
@@ -650,6 +947,28 @@ def render_factor_settings(settings: dict[str, str], notice: str = "") -> str:
         {_save_button()}
       </form>
     </section>
+    <section class="panel">
+      <h2>上传因子</h2>
+      <form method="post" action="/settings/factors/upload" enctype="multipart/form-data">
+        <div class="form-grid">
+          {_field("因子名称", "<input name='factor_name' placeholder='例如：资金流反转因子'>")}
+          {_field("开源协议", _select("factor_license", "MIT", [("MIT", "MIT"), ("Apache-2.0", "Apache-2.0"), ("BSD-3-Clause", "BSD-3-Clause"), ("Proprietary", "暂不公开")]))}
+          {_field("说明", "<textarea name='factor_description' placeholder='简要说明输入数据、计算逻辑和适用场景'></textarea>", wide=True)}
+          {_field("因子文件", "<input type='file' name='factor_file' accept='.py,.json,.md,.txt'>", "仅保存为本地贡献包，不会自动执行未审核代码", wide=True)}
+        </div>
+        <label class="option-row"><input type="checkbox" name="share_to_community" value="true">标记为可贡献给社区</label>
+        {_save_button("上传因子")}
+      </form>
+    </section>
+    <section class="panel">
+      <h2>社区贡献</h2>
+      <ul class="note-list">
+        <li>上传文件会和说明一起保存为本地贡献包。</li>
+        <li>准备贡献的因子可以从本地目录提交 PR，后续可做一键发布到社区市场。</li>
+        <li>为了安全，Web UI 不会直接执行用户上传的 Python 因子代码。</li>
+      </ul>
+    </section>
+    {upload_table}
     """
     return _layout("factors", "因子市场", "选择参与分析的增强因子", content, settings, notice)
 
@@ -691,6 +1010,27 @@ def _updates_for_route(route: str, params: dict[str, list[str]]) -> dict[str, st
         if api_key:
             updates["LLM_API_KEY"] = api_key
         return updates
+    if route == "/settings/channels":
+        channel = _first(params, "notify_channel", "feishu")
+        if channel not in {"feishu", "web"}:
+            channel = "feishu"
+        updates = {
+            "NOTIFY_CHANNEL": channel,
+            "FEISHU_APP_ID": _first(params, "feishu_app_id"),
+            "FEISHU_RECEIVE_ID": _first(params, "feishu_receive_id"),
+            "FEISHU_RECEIVE_ID_TYPE": _first(params, "feishu_receive_id_type", "open_id"),
+            "FEISHU_RECEIVE_ID_2": _first(params, "feishu_receive_id_2"),
+        }
+        secret_map = {
+            "feishu_app_secret": "FEISHU_APP_SECRET",
+            "feishu_verification_token": "FEISHU_VERIFICATION_TOKEN",
+            "feishu_encrypt_key": "FEISHU_ENCRYPT_KEY",
+        }
+        for form_key, env_key in secret_map.items():
+            value = _first(params, form_key).strip()
+            if value:
+                updates[env_key] = value
+        return updates
     if route == "/settings/watchlist":
         codes = re.findall(r"\d{6}", _first(params, "watchlist"))
         return {
@@ -726,10 +1066,14 @@ def _render_route(route: str, storage: Storage, notice: str = "") -> str:
     settings = load_settings()
     if route == "/":
         return render_home(load_dashboard_data(storage), settings, notice)
+    if route == "/console":
+        return render_console(storage, settings, notice=notice)
     if route == "/settings/watchlist":
         return render_watchlist_settings(settings, notice)
     if route == "/settings/model":
         return render_model_settings(settings, notice)
+    if route == "/settings/channels":
+        return render_channel_settings(settings, notice)
     if route == "/settings/features":
         return render_feature_settings(settings, notice)
     if route == "/settings/personalization":
@@ -746,10 +1090,12 @@ def make_handler(storage: Storage):
             route = parsed.path
             if route not in {
                 "/",
+                "/console",
                 "/api.json",
                 "/health",
                 "/settings/watchlist",
                 "/settings/model",
+                "/settings/channels",
                 "/settings/features",
                 "/settings/personalization",
                 "/settings/factors",
@@ -782,17 +1128,45 @@ def make_handler(storage: Storage):
             parsed = urlparse(self.path)
             route = parsed.path
             if route not in {
+                "/console",
                 "/settings/watchlist",
                 "/settings/model",
+                "/settings/channels",
                 "/settings/features",
                 "/settings/personalization",
                 "/settings/factors",
+                "/settings/factors/upload",
             }:
                 self.send_error(404)
                 return
             length = int(self.headers.get("Content-Length") or "0")
-            raw = self.rfile.read(length).decode("utf-8")
-            params = parse_qs(raw, keep_blank_values=True)
+            raw = self.rfile.read(length)
+            params, files = _parse_form_data(self.headers, raw)
+            if route == "/console":
+                result = _run_web_action(params, storage)
+                settings = load_settings()
+                body = render_console(
+                    storage, settings, result=result,
+                    question=_first(params, "question"),
+                ).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if route == "/settings/factors/upload":
+                try:
+                    notice = save_custom_factor(params, files)
+                except ValueError as exc:
+                    notice = str(exc)
+                body = _render_route("/settings/factors", storage, notice).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
             save_settings(_updates_for_route(route, params))
             self.send_response(303)
             self.send_header("Location", f"{route}?saved=1")

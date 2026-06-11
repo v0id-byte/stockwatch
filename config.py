@@ -38,11 +38,13 @@ class Config:
     def _validate(self):
         if _env_bool("STOCKWATCH_SKIP_REQUIRED_CONFIG", False):
             return
-        required = [
-            "FEISHU_APP_ID",
-            "FEISHU_APP_SECRET",
-            "FEISHU_RECEIVE_ID",
-        ]
+        required = []
+        if self.notify_channel == "feishu":
+            required.extend([
+                "FEISHU_APP_ID",
+                "FEISHU_APP_SECRET",
+                "FEISHU_RECEIVE_ID",
+            ])
         if not self.llm_api_key and not self.llm_allows_empty_key:
             required.append("LLM_API_KEY")
         missing = [k for k in required if not os.getenv(k)]
@@ -142,6 +144,13 @@ class Config:
     @property
     def feishu_encrypt_key(self) -> str:
         return os.getenv("FEISHU_ENCRYPT_KEY", "")
+
+    @property
+    def notify_channel(self) -> str:
+        value = os.getenv("NOTIFY_CHANNEL", "feishu").strip().lower()
+        if value in {"feishu", "web"}:
+            return value
+        return "feishu"
 
     # === 数据源 ===
     @property

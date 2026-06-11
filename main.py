@@ -288,6 +288,10 @@ def _monitor_major_news(storage: Storage, market: MarketData, feishu: FeishuClie
 
 def monitor_once(check_news: bool = False):
     """盘中轻量监控：盯加仓价 + 可选重大新闻扫描。"""
+    cfg = get_config()
+    if cfg.notify_channel != "feishu":
+        logger.info("NOTIFY_CHANNEL=web，盘中轻量监控仅在 Web 控制台查看，跳过飞书推送")
+        return
     storage = Storage()
     market = MarketData()
     feishu = FeishuClient()
@@ -370,13 +374,17 @@ def test():
     except Exception as e:
         print(f"❌ LLM 失败: {e}")
 
-    # 3. 飞书
+    # 3. 通知渠道
     try:
-        feishu = FeishuClient()
-        token = feishu._get_token()
-        print(f"✅ 飞书连接成功")
+        cfg = get_config()
+        if cfg.notify_channel == "feishu":
+            feishu = FeishuClient()
+            token = feishu._get_token()
+            print(f"✅ 飞书连接成功")
+        else:
+            print("✅ 通知渠道：Web 控制台（跳过飞书连接）")
     except Exception as e:
-        print(f"❌ 飞书失败: {e}")
+        print(f"❌ 通知渠道失败: {e}")
 
     # 4. v2 模块冷启动检查
     try:
@@ -595,21 +603,25 @@ def once():
         llm_calls += 1
 
     # 6. 推送
-    feishu = FeishuClient()
+    feishu = FeishuClient() if cfg.notify_channel == "feishu" else None
     push_ok = False
     push_status = "无可推送信号"
     if run_results:
         card = render_card(run_id, run_results, regime_info=regime_info if cfg.enable_regime else None)
         if card:
-            push_ok = feishu.send_message(card)
-            push_status = "成功" if push_ok else "失败"
-            for d in run_results:
-                storage.mark_decision_pushed(run_id, d["code"], push_ok)
-                if not push_ok:
-                    break
+            if feishu:
+                push_ok = feishu.send_message(card)
+                push_status = "成功" if push_ok else "失败"
+                for d in run_results:
+                    storage.mark_decision_pushed(run_id, d["code"], push_ok)
+                    if not push_ok:
+                        break
+            else:
+                push_ok = True
+                push_status = "已写入 Web 控制台"
         else:
             push_status = "无可展示信号"
-    if not all_alert_results:
+    if feishu and not all_alert_results:
         summary_ok = _send_after_close_summary(
             storage, feishu, final_decisions, run_results,
             tracked_positions, price_alerts,
