@@ -229,7 +229,7 @@ python main.py dashboard
 Web 控制台直接读取本地 SQLite，并提供本地配置入口，可用于：
 
 - 最近运行记录
-- AI 控制台里直接提问、查股票、开始/停止持仓跟踪、设置/取消盯价
+- AI 控制台里直接提问、查股票、开始/停止持仓跟踪、设置/取消盯价；回答区会提取关键摘要和可一键执行的盯盘动作
 - 最近信号和置信度
 - 活跃持仓跟踪
 - 活跃盯价提醒
@@ -654,7 +654,7 @@ Default URL: `http://127.0.0.1:8765`.
 
 The web console reads the local SQLite database and provides:
 
-- Direct AI chat for market questions, stock research, position tracking and buy-price alerts
+- Direct AI chat for market questions, stock research, position tracking and buy-price alerts, with key summaries and one-click watch actions in the answer area
 - Recent runs, recent signals, active tracked positions, active price alerts and signal review
 - Settings pages for the watchlist, model endpoint/API key, notification channel, feature toggles, AI response style and factor switches
 - Custom factor uploads saved as local contribution packages for future community sharing

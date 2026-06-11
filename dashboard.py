@@ -230,11 +230,112 @@ def _card_to_result(card: dict) -> dict:
         text = element.get("text") or {}
         if text.get("content"):
             parts.append(str(text["content"]))
-    return {"title": title, "text": "\n".join(parts), "ok": True}
+    text = "\n".join(parts)
+    if "帮助" in title:
+        summary, actions = [], []
+    else:
+        summary, actions = _console_summary_and_actions(title, text)
+    return {"title": title, "text": text, "ok": True, "summary": summary, "actions": actions}
 
 
 def _error_result(message: str) -> dict:
-    return {"title": "操作失败", "text": message, "ok": False}
+    return {"title": "操作失败", "text": message, "ok": False, "summary": [], "actions": []}
+
+
+def _is_market_question(text: str) -> bool:
+    if re.search(r"(?<!\d)\d{6}(?!\d)", text):
+        return False
+    stripped = re.sub(r"\s+", "", text or "")
+    if any(word in stripped for word in ("大盘", "市场", "指数")):
+        return True
+    return stripped in {"现在行情怎么样", "今天行情怎么样", "行情怎么样", "今天怎么样", "现在怎么样"}
+
+
+def _market_snapshot_result(service) -> dict:
+    from bot.research import build_market_snapshot, format_market_snapshot
+
+    snapshot = build_market_snapshot(
+        service.market,
+        service.storage,
+        include_news=False,
+        include_north=False,
+        include_regime=False,
+    )
+    text = format_market_snapshot(snapshot)
+    indexes = snapshot.get("indexes", [])
+    valid_pcts = [item.get("pct_change") for item in indexes if item.get("pct_change") is not None]
+    avg_pct = sum(valid_pcts) / len(valid_pcts) if valid_pcts else 0
+    tone = "偏强" if avg_pct >= 0.4 else "偏弱" if avg_pct <= -0.4 else "震荡"
+    summary = [{"label": "市场状态", "value": tone}]
+    for item in indexes[:4]:
+        pct = item.get("pct_change")
+        value = f"{pct:+.2f}%" if pct is not None else "暂无"
+        summary.append({"label": item.get("name", "指数"), "value": value})
+    return {"title": "行情快照", "text": text, "ok": True, "summary": summary, "actions": []}
+
+
+def _extract_price(text: str, patterns: list[str]) -> str:
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def _console_summary_and_actions(title: str, text: str) -> tuple[list[dict], list[dict]]:
+    code_match = re.search(r"\((\d{6})\)", text) or re.search(r"(?<!\d)(\d{6})(?!\d)", text)
+    code = code_match.group(1) if code_match else ""
+    action = "观察"
+    if re.search(r"\bBUY\b|推荐买入|建议买入|可关注机会|买入", text):
+        action = "关注买入"
+    if re.search(r"\bSELL\b|推荐卖出|建议卖出|减仓|离场|风险变高", text):
+        action = "复核卖出"
+    if "HOLD" in text or "暂不操作" in text:
+        action = "继续观察"
+
+    confidence = _extract_price(text, [r"置信度\s*([0-9]+%)"])
+    buy_price = _extract_price(text, [r"参考买入价\s*([0-9]+(?:\.[0-9]+)?)", r"买入\s*([0-9]+(?:\.[0-9]+)?)\s*元"])
+    stop_loss = _extract_price(text, [r"止损\s*([0-9]+(?:\.[0-9]+)?)", r"跌破\s*([0-9]+(?:\.[0-9]+)?)\s*止损"])
+    target = _extract_price(text, [r"目标卖出\s*([0-9]+(?:\.[0-9]+)?)", r"目标\s*([0-9]+(?:\.[0-9]+)?)"])
+    support = _extract_price(text, [r"支撑\s*([0-9]+(?:\.[0-9]+)?)"])
+    resistance = _extract_price(text, [r"压力\s*([0-9]+(?:\.[0-9]+)?)"])
+    current = _extract_price(text, [r"现价：\s*([0-9]+(?:\.[0-9]+)?)", r"当前价：\s*([0-9]+(?:\.[0-9]+)?)"])
+
+    summary = [{"label": "AI 建议", "value": action}]
+    if code:
+        summary.append({"label": "标的", "value": code})
+    if confidence:
+        summary.append({"label": "置信度", "value": confidence})
+    for label, value in [
+        ("现价", current),
+        ("参考买入", buy_price),
+        ("止损", stop_loss),
+        ("目标", target),
+        ("支撑", support),
+        ("压力", resistance),
+    ]:
+        if value:
+            summary.append({"label": label, "value": value})
+
+    actions = []
+    track_price = buy_price or current
+    if code and track_price and action in {"关注买入", "继续观察"}:
+        actions.append({
+            "label": "按参考价跟踪持仓",
+            "params": {"console_action": "track_position", "code": code, "price": track_price},
+        })
+    alert_price = support or stop_loss or buy_price
+    if code and alert_price:
+        actions.append({
+            "label": "跌到关键价提醒",
+            "params": {"console_action": "price_alert", "code": code, "price": alert_price},
+        })
+    if code:
+        actions.append({
+            "label": "停止跟踪这只",
+            "params": {"console_action": "close_position", "code": code},
+        })
+    return summary[:8], actions[:3]
 
 
 def _run_web_command(text: str, storage: Storage) -> dict:
@@ -253,6 +354,8 @@ def _run_web_command(text: str, storage: Storage) -> dict:
         if command.action == "query":
             return _card_to_result(service.query_stock(command.code))
         if command.action == "research":
+            if not command.code and _is_market_question(command.text or text):
+                return _market_snapshot_result(service)
             return _card_to_result(service.research_stock(command.text or text, command.code))
         if command.action == "buy":
             if not command.price:
@@ -463,6 +566,34 @@ def _table(title: str, headers: list[str], body: str) -> str:
     )
 
 
+def _console_result_html(result: dict | None) -> str:
+    if not result:
+        return """
+        <section id="console-result" class="answer-card empty-answer">
+          <h2>回答</h2>
+          <p>提问后，回答会直接显示在这里。</p>
+        </section>
+        """
+    cls = "ok" if result.get("ok") else "error"
+    summary = "".join(
+        f"<div class='summary-chip'><span>{_e(item.get('label'))}</span><strong>{_e(item.get('value'))}</strong></div>"
+        for item in result.get("summary", [])
+    )
+    actions = "".join(
+        "<button type='button' class='secondary action-button' "
+        f"data-action='{_e(json.dumps(action.get('params', {}), ensure_ascii=False))}'>{_e(action.get('label'))}</button>"
+        for action in result.get("actions", [])
+    )
+    summary_html = f"<div class='summary-grid'>{summary}</div>" if summary else ""
+    actions_html = f"<div class='suggested-actions'>{actions}</div>" if actions else ""
+    return (
+        f"<section id='console-result' class='answer-card {cls}'>"
+        f"<h2>{_e(result.get('title') or '回答')}</h2>"
+        f"{summary_html}<div class='result-text'>{_e(result.get('text'))}</div>{actions_html}"
+        "</section>"
+    )
+
+
 def _select(name: str, current: str, options: list[tuple[str, str]]) -> str:
     items = []
     for value, label in options:
@@ -528,25 +659,27 @@ def _layout(active: str, title: str, subtitle: str, content: str,
   <style>
     :root {{
       color-scheme: light;
-      --bg: #f4f6f8;
-      --text: #1d2429;
-      --muted: #66737c;
-      --line: #d8dee4;
+      --bg: #f5f5f7;
+      --text: #1d1d1f;
+      --muted: #6e6e73;
+      --line: #d6d6dc;
       --panel: #ffffff;
-      --panel-soft: #f9fafb;
+      --panel-soft: #fbfbfd;
       --green: #16845b;
       --red: #b9473f;
       --orange: #a76a18;
-      --blue: #246b9f;
-      --nav: #26323a;
-      --nav-active: #e8f2ed;
+      --blue: #0a84ff;
+      --nav: #2c2c2e;
+      --nav-active: #eef5ff;
+      --shadow: 0 18px 45px rgba(0, 0, 0, 0.07);
     }}
     * {{ box-sizing: border-box; }}
     body {{
       margin: 0;
       font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       color: var(--text);
-      background: var(--bg);
+      background:
+        linear-gradient(180deg, #ffffff 0%, var(--bg) 240px);
     }}
     .shell {{ display: flex; min-height: 100vh; }}
     aside {{
@@ -554,7 +687,7 @@ def _layout(active: str, title: str, subtitle: str, content: str,
       flex: 0 0 224px;
       padding: 20px 14px;
       border-right: 1px solid var(--line);
-      background: var(--panel);
+      background: rgba(255, 255, 255, 0.86);
     }}
     .brand {{ padding: 0 8px 18px; border-bottom: 1px solid var(--line); }}
     .brand strong {{ display: block; font-size: 18px; }}
@@ -568,12 +701,12 @@ def _layout(active: str, title: str, subtitle: str, content: str,
       text-decoration: none;
       font-weight: 560;
     }}
-    nav a:hover, nav a.active {{ background: var(--nav-active); color: #0f5f40; }}
+    nav a:hover, nav a.active {{ background: var(--nav-active); color: #0057d9; }}
     .content {{ flex: 1; min-width: 0; }}
     header {{
       padding: 22px clamp(16px, 4vw, 42px) 16px;
       border-bottom: 1px solid var(--line);
-      background: var(--panel);
+      background: rgba(255, 255, 255, 0.86);
     }}
     h1 {{ margin: 0; font-size: clamp(23px, 3vw, 32px); letter-spacing: 0; }}
     .sub {{ margin-top: 6px; color: var(--muted); }}
@@ -596,6 +729,7 @@ def _layout(active: str, title: str, subtitle: str, content: str,
       background: var(--panel);
       border: 1px solid var(--line);
       border-radius: 8px;
+      box-shadow: var(--shadow);
     }}
     .metric {{ padding: 13px 14px; min-height: 76px; }}
     .metric span {{ display: block; color: var(--muted); font-size: 12px; }}
@@ -617,11 +751,27 @@ def _layout(active: str, title: str, subtitle: str, content: str,
       color: var(--text);
       font: inherit;
     }}
+    input:focus, select:focus, textarea:focus {{
+      border-color: var(--blue);
+      box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.16);
+      outline: none;
+    }}
     textarea {{ min-height: 168px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }}
     .hint {{ color: var(--muted); font-size: 12px; }}
     .options {{ display: grid; gap: 10px; margin-top: 8px; }}
-    .console-grid {{ display: grid; grid-template-columns: minmax(280px, 1fr) minmax(280px, 0.9fr); gap: 16px; align-items: start; }}
-    .result {{
+    .console-grid {{ display: grid; grid-template-columns: minmax(300px, 1.1fr) minmax(280px, 0.9fr); gap: 16px; align-items: start; }}
+    .answer-card {{
+      max-width: 1080px;
+      margin-top: 18px;
+      padding: 0;
+      border: 0;
+      border-radius: 8px;
+      background: transparent;
+      box-shadow: none;
+    }}
+    .answer-card h2 {{ margin-bottom: 12px; }}
+    .empty-answer {{ color: var(--muted); }}
+    .result-text {{
       white-space: pre-wrap;
       overflow-wrap: anywhere;
       padding: 14px;
@@ -629,8 +779,25 @@ def _layout(active: str, title: str, subtitle: str, content: str,
       border-radius: 8px;
       background: var(--panel-soft);
     }}
-    .result.ok {{ border-color: #b8dcc8; }}
-    .result.error {{ border-color: #e6b7b0; background: #fff7f5; }}
+    .answer-card.ok {{ border-color: #b8dcc8; }}
+    .answer-card.error {{ border-color: #e6b7b0; }}
+    .answer-card.error .result-text {{ background: #fff7f5; }}
+    .summary-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
+      gap: 10px;
+      margin-bottom: 12px;
+    }}
+    .summary-chip {{
+      min-height: 62px;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel-soft);
+    }}
+    .summary-chip span {{ display: block; color: var(--muted); font-size: 12px; }}
+    .summary-chip strong {{ display: block; margin-top: 5px; font-size: 17px; }}
+    .suggested-actions {{ display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }}
     .mini-grid {{ display: grid; grid-template-columns: repeat(2, minmax(160px, 1fr)); gap: 10px; }}
     .note-list {{ margin: 8px 0 0; padding-left: 18px; color: var(--muted); }}
     .path {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; overflow-wrap: anywhere; }}
@@ -652,12 +819,19 @@ def _layout(active: str, title: str, subtitle: str, content: str,
       padding: 0 16px;
       border: 0;
       border-radius: 8px;
-      background: #176b4c;
+      background: #1d1d1f;
       color: #fff;
       font-weight: 650;
       cursor: pointer;
     }}
-    button:hover {{ background: #0f5f40; }}
+    button:hover {{ background: #3a3a3c; }}
+    button:disabled {{ cursor: wait; opacity: 0.64; }}
+    button.secondary {{
+      border: 1px solid var(--line);
+      background: #fff;
+      color: var(--text);
+    }}
+    button.secondary:hover {{ background: var(--panel-soft); }}
     .table-wrap {{
       overflow-x: auto;
       background: var(--panel);
@@ -709,6 +883,88 @@ def _layout(active: str, title: str, subtitle: str, content: str,
       </main>
     </div>
   </div>
+  <script>
+  (() => {{
+    const resultBox = document.getElementById("console-result");
+    if (!resultBox) return;
+
+    const escapeHtml = (value) => String(value || "").replace(/[&<>"']/g, (ch) => ({{
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;",
+    }}[ch]));
+
+    const renderResult = (payload) => {{
+      const ok = payload.ok !== false;
+      const summary = (payload.summary || []).map((item) => `
+        <div class="summary-chip"><span>${{escapeHtml(item.label)}}</span><strong>${{escapeHtml(item.value)}}</strong></div>
+      `).join("");
+      const actions = (payload.actions || []).map((action) => `
+        <button type="button" class="secondary action-button" data-action='${{escapeHtml(JSON.stringify(action.params || {{}}))}}'>${{escapeHtml(action.label)}}</button>
+      `).join("");
+      resultBox.className = `answer-card ${{ok ? "ok" : "error"}}`;
+      resultBox.innerHTML = `
+        <h2>${{escapeHtml(payload.title || "回答")}}</h2>
+        ${{summary ? `<div class="summary-grid">${{summary}}</div>` : ""}}
+        <div class="result-text">${{escapeHtml(payload.text || "")}}</div>
+        ${{actions ? `<div class="suggested-actions">${{actions}}</div>` : ""}}
+      `;
+    }};
+
+    const setLoading = (message) => {{
+      resultBox.className = "answer-card ok";
+      resultBox.innerHTML = `
+        <h2>正在分析</h2>
+        <div class="result-text">${{escapeHtml(message || "正在获取行情、公告和模型回答，页面仍可继续操作。")}}</div>
+      `;
+    }};
+
+    const postConsole = async (params, button) => {{
+      const originalText = button ? button.textContent : "";
+      if (button) {{
+        button.disabled = true;
+        button.textContent = "处理中";
+      }}
+      setLoading();
+      try {{
+        const response = await fetch("/api/console", {{
+          method: "POST",
+          headers: {{"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"}},
+          body: new URLSearchParams(params),
+        }});
+        const payload = await response.json();
+        renderResult(payload);
+      }} catch (error) {{
+        renderResult({{ok: false, title: "操作失败", text: String(error), summary: [], actions: []}});
+      }} finally {{
+        if (button) {{
+          button.disabled = false;
+          button.textContent = originalText;
+        }}
+      }}
+    }};
+
+    document.querySelectorAll("form[data-console-form]").forEach((form) => {{
+      form.addEventListener("submit", (event) => {{
+        event.preventDefault();
+        const button = event.submitter || form.querySelector("button[type=submit]");
+        postConsole(new FormData(form), button);
+      }});
+    }});
+
+    resultBox.addEventListener("click", (event) => {{
+      const button = event.target.closest(".action-button");
+      if (!button) return;
+      try {{
+        postConsole(JSON.parse(button.dataset.action || "{{}}"), button);
+      }} catch (error) {{
+        renderResult({{ok: false, title: "操作失败", text: "推荐操作解析失败", summary: [], actions: []}});
+      }}
+    }});
+  }})();
+  </script>
 </body>
 </html>"""
 
@@ -729,25 +985,20 @@ def render_home(data: dict, settings: dict[str, str], notice: str = "") -> str:
 def render_console(storage: Storage, settings: dict[str, str], result: dict | None = None,
                    question: str = "", notice: str = "") -> str:
     data = load_dashboard_data(storage)
-    result_html = ""
-    if result:
-        cls = "ok" if result.get("ok") else "error"
-        result_html = (
-            f"<section><h2>{_e(result.get('title'))}</h2>"
-            f"<div class='result {cls}'>{_e(result.get('text'))}</div></section>"
-        )
+    result_html = _console_result_html(result)
     content = f"""
     <div class="console-grid">
       <section class="panel">
         <h2>直接提问</h2>
-        <form method="post" action="/console">
+        <form method="post" action="/console" data-console-form>
           {_field("问题或命令", f"<textarea name='question' placeholder='例如：现在行情怎么样 / 600519 最近怎么样 / 盯买 600519 1500'>{_e(question)}</textarea>", wide=True)}
           {_save_button("发送")}
         </form>
+        {result_html}
       </section>
       <section class="panel">
         <h2>盯盘控制</h2>
-        <form method="post" action="/console" class="options">
+        <form method="post" action="/console" class="options" data-console-form>
           <input type="hidden" name="console_action" value="track_position">
           <div class="mini-grid">
             <input name="code" placeholder="代码 600519">
@@ -756,7 +1007,7 @@ def render_console(storage: Storage, settings: dict[str, str], result: dict | No
           </div>
           <button type="submit">开始持仓跟踪</button>
         </form>
-        <form method="post" action="/console" class="options">
+        <form method="post" action="/console" class="options" data-console-form>
           <input type="hidden" name="console_action" value="price_alert">
           <div class="mini-grid">
             <input name="code" placeholder="代码 600519">
@@ -765,19 +1016,18 @@ def render_console(storage: Storage, settings: dict[str, str], result: dict | No
           </div>
           <button type="submit">新增盯价提醒</button>
         </form>
-        <form method="post" action="/console" class="options">
+        <form method="post" action="/console" class="options" data-console-form>
           <input type="hidden" name="console_action" value="close_position">
           <input name="code" placeholder="代码 600519">
           <button type="submit">停止持仓跟踪</button>
         </form>
-        <form method="post" action="/console" class="options">
+        <form method="post" action="/console" class="options" data-console-form>
           <input type="hidden" name="console_action" value="cancel_price_alert">
           <input name="code" placeholder="代码 600519">
           <button type="submit">取消盯价提醒</button>
         </form>
       </section>
     </div>
-    {result_html}
     {_positions_table(data['positions'])}
     {_alerts_table(data['price_alerts'])}
     """
@@ -1128,6 +1378,7 @@ def make_handler(storage: Storage):
             parsed = urlparse(self.path)
             route = parsed.path
             if route not in {
+                "/api/console",
                 "/console",
                 "/settings/watchlist",
                 "/settings/model",
@@ -1142,6 +1393,15 @@ def make_handler(storage: Storage):
             length = int(self.headers.get("Content-Length") or "0")
             raw = self.rfile.read(length)
             params, files = _parse_form_data(self.headers, raw)
+            if route == "/api/console":
+                result = _run_web_action(params, storage)
+                body = json.dumps(result, ensure_ascii=False, default=str).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
             if route == "/console":
                 result = _run_web_action(params, storage)
                 settings = load_settings()
