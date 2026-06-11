@@ -699,6 +699,16 @@ def _onboarding_panel(data: dict, settings: dict[str, str]) -> str:
     """
 
 
+def _compliance_notice() -> str:
+    return """
+    <section class="compliance">
+      <h2>合规边界</h2>
+      <p>StockWatch 是自选股盯盘提醒、公开信息聚合和持仓风险复核工具，不是证券投资咨询服务，也不是荐股软件。</p>
+      <p>“机会观察”“风险复核”等提示只表示值得进一步查看，不构成买入、卖出或收益承诺；请自行核验交易所公告、上市公司披露和券商行情。</p>
+    </section>
+    """
+
+
 def _layout(active: str, title: str, subtitle: str, content: str,
             settings: dict[str, str], notice: str = "") -> str:
     notice_html = f"<div class='notice'>{_e(notice)}</div>" if notice else ""
@@ -840,6 +850,17 @@ def _layout(active: str, title: str, subtitle: str, content: str,
       background: #eef8f2;
       color: var(--green);
     }}
+    .compliance {{
+      max-width: 1080px;
+      margin-top: 28px;
+      padding: 14px 16px;
+      border: 1px solid #f0d2a5;
+      border-radius: 8px;
+      background: #fffaf2;
+      color: #4b3a23;
+    }}
+    .compliance h2 {{ margin-bottom: 6px; font-size: 15px; }}
+    .compliance p {{ margin: 5px 0 0; color: #6a5430; font-size: 12px; }}
     .form-grid {{ display: grid; grid-template-columns: repeat(2, minmax(220px, 1fr)); gap: 14px; }}
     .field {{ display: grid; gap: 7px; }}
     .field.wide {{ grid-column: 1 / -1; }}
@@ -1004,6 +1025,7 @@ def _layout(active: str, title: str, subtitle: str, content: str,
       <main>
         {notice_html}
         {content}
+        {_compliance_notice()}
       </main>
     </div>
   </div>
