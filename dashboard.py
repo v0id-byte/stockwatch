@@ -7,12 +7,14 @@ import html
 import json
 import os
 import re
+import secrets
 import sqlite3
 from datetime import datetime
 from email.parser import BytesParser
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 from analysis.report import build_report
 from utils.storage import Storage
@@ -25,6 +27,7 @@ _ENV_ASSIGN_RE = re.compile(r"^(\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*=\s*)(.*?)(\r?\n
 WEB_USER_ID = "web-ui"
 WEB_CHAT_ID = "web-ui"
 FEEDBACK_URL = "https://github.com/v0id-byte/stockwatch/issues"
+AUTH_COOKIE = "stockwatch_auth"
 
 DEFAULT_SETTINGS = {
     "NOTIFY_CHANNEL": "feishu",
@@ -52,7 +55,66 @@ DEFAULT_SETTINGS = {
     "FEISHU_RECEIVE_ID_2": "",
     "FEISHU_VERIFICATION_TOKEN": "",
     "FEISHU_ENCRYPT_KEY": "",
+    "WEB_AUTH_TOKEN": "",
 }
+
+BUILTIN_FACTORS = [
+    {
+        "id": "regime",
+        "env_key": "ENABLE_REGIME",
+        "name": "市场状态因子",
+        "category": "风控",
+        "horizon": "短线/波动",
+        "source": "官方",
+        "description": "识别大盘波动状态，在高波动阶段抬高提醒阈值，减少情绪化打扰。",
+        "data_requirements": "指数 K 线、20 日波动率",
+        "status": "builtin",
+    },
+    {
+        "id": "sector",
+        "env_key": "ENABLE_SECTOR",
+        "name": "板块强弱因子",
+        "category": "板块轮动",
+        "horizon": "1-5 日",
+        "source": "官方",
+        "description": "比较所属板块近期强弱，把个股提醒放回板块环境里解释。",
+        "data_requirements": "个股-板块映射、板块 5 日收益",
+        "status": "builtin",
+    },
+    {
+        "id": "alpha158",
+        "env_key": "ENABLE_ALPHA158",
+        "name": "Alpha158 技术因子",
+        "category": "技术面",
+        "horizon": "5-20 日",
+        "source": "官方",
+        "description": "计算动量、波动、成交量结构、相对强弱和回撤等量化特征。",
+        "data_requirements": "个股日 K、指数日 K",
+        "status": "builtin",
+    },
+    {
+        "id": "calibration",
+        "env_key": "ENABLE_CALIBRATION",
+        "name": "提醒校准因子",
+        "category": "提醒质量",
+        "horizon": "复盘",
+        "source": "官方",
+        "description": "用历史提醒结果校准置信度，让后续提醒更克制。",
+        "data_requirements": "历史 decisions、后验成功标记",
+        "status": "builtin",
+    },
+    {
+        "id": "lgbm",
+        "env_key": "ENABLE_LGBM",
+        "name": "LightGBM 排序因子",
+        "category": "机器学习",
+        "horizon": "20 日",
+        "source": "官方",
+        "description": "离线训练横截面排序模型，线上只作为解释和排序辅助。",
+        "data_requirements": "训练好的 LGBM 模型、Alpha 因子",
+        "status": "builtin",
+    },
+]
 
 
 def _rows(conn: sqlite3.Connection, sql: str, params: list | None = None) -> list[dict]:
@@ -100,6 +162,39 @@ def load_settings() -> dict[str, str]:
         else:
             values["LLM_API_KEY"] = env_values.get("MINIMAX_API_KEY", os.getenv("MINIMAX_API_KEY", ""))
     return values
+
+
+def _web_auth_token() -> str:
+    return (load_settings().get("WEB_AUTH_TOKEN") or "").strip()
+
+
+def _cookie_value(headers, name: str) -> str:
+    raw = headers.get("Cookie", "")
+    if not raw:
+        return ""
+    cookie = SimpleCookie()
+    try:
+        cookie.load(raw)
+    except Exception:
+        return ""
+    morsel = cookie.get(name)
+    return morsel.value if morsel else ""
+
+
+def _request_token(headers, params: dict[str, list[str]]) -> str:
+    return (
+        headers.get("X-StockWatch-Token", "").strip()
+        or _first(params, "token").strip()
+        or _cookie_value(headers, AUTH_COOKIE).strip()
+    )
+
+
+def _is_authorized(headers, params: dict[str, list[str]] | None = None) -> bool:
+    token = _web_auth_token()
+    if not token:
+        return True
+    supplied = _request_token(headers, params or {})
+    return bool(supplied) and secrets.compare_digest(supplied, token)
 
 
 def _serialize_env_value(value: str) -> str:
@@ -189,6 +284,9 @@ def save_custom_factor(params: dict[str, list[str]], files: dict[str, tuple[str,
 
     name = _first(params, "factor_name", Path(filename).stem).strip() or Path(filename).stem
     description = _first(params, "factor_description").strip()
+    category = _first(params, "factor_category", "自定义").strip() or "自定义"
+    horizon = _first(params, "factor_horizon", "自定义").strip() or "自定义"
+    data_requirements = _first(params, "factor_data_requirements").strip()
     license_name = _first(params, "factor_license", "MIT").strip() or "MIT"
     share = _bool_param(params, "share_to_community") == "true"
     CUSTOM_FACTORS_DIR.mkdir(parents=True, exist_ok=True)
@@ -197,9 +295,14 @@ def save_custom_factor(params: dict[str, list[str]], files: dict[str, tuple[str,
     target = CUSTOM_FACTORS_DIR / target_name
     target.write_bytes(payload)
     manifest = {
+        "id": _factor_slug(name),
         "name": name,
+        "category": category,
+        "horizon": horizon,
         "description": description,
+        "data_requirements": data_requirements,
         "license": license_name,
+        "source": "用户上传",
         "share_to_community": share,
         "status": "contribution_ready" if share else "local_draft",
         "file": str(target),
@@ -222,6 +325,56 @@ def load_custom_factors() -> list[dict]:
         item["_manifest"] = str(path)
         items.append(item)
     return items[:40]
+
+
+def _factor_enabled(settings: dict[str, str], item: dict) -> bool:
+    env_key = item.get("env_key")
+    return bool(env_key and str(settings.get(env_key, "false")).lower() in {"1", "true", "yes", "on"})
+
+
+def _normalize_custom_factor(item: dict) -> dict:
+    name = item.get("name") or Path(item.get("file", "custom-factor")).stem
+    return {
+        "id": item.get("id") or _factor_slug(str(name)),
+        "name": name,
+        "category": item.get("category") or "自定义",
+        "horizon": item.get("horizon") or "自定义",
+        "source": item.get("source") or "用户上传",
+        "description": item.get("description") or "用户上传的本地因子，默认只入库展示，不自动执行。",
+        "data_requirements": item.get("data_requirements") or "见上传文件说明",
+        "license": item.get("license") or "未声明",
+        "status": item.get("status") or "local_draft",
+        "file": item.get("file") or "",
+        "uploaded_at": item.get("uploaded_at") or "",
+        "share_to_community": bool(item.get("share_to_community")),
+    }
+
+
+def load_factor_catalog(settings: dict[str, str], filters: dict[str, str] | None = None) -> list[dict]:
+    filters = filters or {}
+    catalog = [dict(item, enabled=_factor_enabled(settings, item), executable=True) for item in BUILTIN_FACTORS]
+    catalog.extend(dict(_normalize_custom_factor(item), enabled=False, executable=False) for item in load_custom_factors())
+
+    query = filters.get("q", "").strip().lower()
+    category = filters.get("category", "").strip()
+    source = filters.get("source", "").strip()
+    status = filters.get("status", "").strip()
+
+    def matches(item: dict) -> bool:
+        haystack = " ".join(str(item.get(key, "")) for key in ("name", "category", "horizon", "source", "description")).lower()
+        if query and query not in haystack:
+            return False
+        if category and item.get("category") != category:
+            return False
+        if source and item.get("source") != source:
+            return False
+        if status == "enabled" and not item.get("enabled"):
+            return False
+        if status == "local" and item.get("source") != "用户上传":
+            return False
+        return True
+
+    return [item for item in catalog if matches(item)]
 
 
 def _card_to_result(card: dict) -> dict:
@@ -407,7 +560,7 @@ def load_dashboard_data(storage: Storage) -> dict:
             FROM runs ORDER BY run_ts DESC LIMIT 12
         """)
         decisions = _rows(conn, """
-            SELECT run_ts, code, name, action, confidence, target_price, stop_loss, one_liner, pushed
+            SELECT id, run_ts, code, name, action, confidence, target_price, stop_loss, one_liner, pushed
             FROM decisions ORDER BY run_ts DESC, id DESC LIMIT 40
         """)
         positions = _rows(conn, """
@@ -425,6 +578,7 @@ def load_dashboard_data(storage: Storage) -> dict:
         "decisions": decisions,
         "positions": positions,
         "price_alerts": price_alerts,
+        "feedback": storage.get_recent_alert_feedback(20),
         "report": report,
     }
 
@@ -487,6 +641,42 @@ def _summary_cards(data: dict) -> str:
     )
 
 
+def _feedback_buttons(source: str, code: str, source_id) -> str:
+    buttons = []
+    for label in ("有用", "误报", "看不懂"):
+        buttons.append(
+            "<button type='submit' class='tiny secondary' name='label' "
+            f"value='{_e(label)}'>{_e(label)}</button>"
+        )
+    return (
+        "<form method='post' action='/feedback' class='feedback-buttons'>"
+        f"<input type='hidden' name='source' value='{_e(source)}'>"
+        f"<input type='hidden' name='source_id' value='{_e(source_id)}'>"
+        f"<input type='hidden' name='code' value='{_e(code)}'>"
+        f"{''.join(buttons)}"
+        "</form>"
+    )
+
+
+def _decision_cards(rows: list[dict]) -> str:
+    cards = []
+    for row in rows[:8]:
+        cards.append(
+            "<article class='decision-card'>"
+            f"<div><code>{_e(row.get('code'))}</code><span class='pill {str(row.get('action', '')).lower()}'>{_e(_action_label(row.get('action')))}</span></div>"
+            f"<h3>{_e(row.get('name') or row.get('code'))}</h3>"
+            f"<p>{_e(row.get('one_liner') or '继续观察')}</p>"
+            f"<dl><div><dt>置信度</dt><dd>{_pct(row.get('confidence'))}</dd></div>"
+            f"<div><dt>压力位</dt><dd>{_price(row.get('target_price'))}</dd></div>"
+            f"<div><dt>风险价</dt><dd>{_price(row.get('stop_loss'))}</dd></div></dl>"
+            f"{_feedback_buttons('decision', row.get('code', ''), row.get('id', ''))}"
+            "</article>"
+        )
+    if not cards:
+        return ""
+    return f"<section class='mobile-cards'><h2>今日提醒</h2><div class='decision-card-list'>{''.join(cards)}</div></section>"
+
+
 def _runs_table(rows: list[dict]) -> str:
     body = "".join(
         "<tr>"
@@ -514,10 +704,11 @@ def _decisions_table(rows: list[dict]) -> str:
         f"<td>{_price(row.get('target_price'))}</td>"
         f"<td>{_price(row.get('stop_loss'))}</td>"
         f"<td>{_e(row.get('one_liner'))}</td>"
+        f"<td>{_feedback_buttons('decision', row.get('code', ''), row.get('id', ''))}</td>"
         "</tr>"
         for row in rows
     )
-    return _table("最近提醒", ["时间", "代码", "名称", "类型", "置信度", "压力位", "风险价", "一句话"], body)
+    return _table("最近提醒", ["时间", "代码", "名称", "类型", "置信度", "压力位", "风险价", "一句话", "反馈"], body)
 
 
 def _positions_table(rows: list[dict]) -> str:
@@ -564,6 +755,19 @@ def _report_table(report: dict) -> str:
         for action, stats in rows.items()
     )
     return _table("5日提醒复盘", ["类型", "样本", "命中率", "平均收益", "中位收益"], body)
+
+
+def _feedback_table(rows: list[dict]) -> str:
+    body = "".join(
+        "<tr>"
+        f"<td>{_date(row.get('created_at'))}</td>"
+        f"<td><code>{_e(row.get('code'))}</code></td>"
+        f"<td>{_e(row.get('label'))}</td>"
+        f"<td>{_e(row.get('source'))}</td>"
+        "</tr>"
+        for row in rows
+    )
+    return _table("最近反馈", ["时间", "代码", "反馈", "来源"], body)
 
 
 def _table(title: str, headers: list[str], body: str) -> str:
@@ -645,6 +849,7 @@ def _nav(active: str) -> str:
         ("watchlist", "/settings/watchlist", "自选股"),
         ("model", "/settings/model", "模型配置"),
         ("channels", "/settings/channels", "通知渠道"),
+        ("remote", "/settings/remote", "远程访问"),
         ("features", "/settings/features", "功能开关"),
         ("personalization", "/settings/personalization", "个性化"),
         ("factors", "/settings/factors", "因子市场"),
@@ -656,6 +861,21 @@ def _nav(active: str) -> str:
         links.append(f"<a class='{cls}' href='{href}'{current}>{_e(label)}</a>")
     links.append(f"<a href='{FEEDBACK_URL}' target='_blank' rel='noopener noreferrer'>反馈</a>")
     return "".join(links)
+
+
+def _mobile_tabbar(active: str) -> str:
+    items = [
+        ("home", "/", "今日"),
+        ("console", "/console", "问 AI"),
+        ("watchlist", "/settings/watchlist", "自选"),
+        ("factors", "/settings/factors", "因子"),
+        ("features", "/settings/features", "设置"),
+    ]
+    links = []
+    for key, href, label in items:
+        cls = "active" if key == active else ""
+        links.append(f"<a class='{cls}' href='{href}'>{_e(label)}</a>")
+    return f"<div class='mobile-tabbar'>{''.join(links)}</div>"
 
 
 def _onboarding_panel(data: dict, settings: dict[str, str]) -> str:
@@ -723,6 +943,11 @@ def _layout(active: str, title: str, subtitle: str, content: str,
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#ffffff">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="StockWatch">
+  <link rel="manifest" href="/manifest.json">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
   <title>{_e(title)} · StockWatch</title>
   <style>
     :root {{
@@ -804,6 +1029,7 @@ def _layout(active: str, title: str, subtitle: str, content: str,
     .metric strong {{ display: block; margin-top: 8px; font-size: 20px; font-weight: 650; }}
     section {{ margin-top: 22px; }}
     h2 {{ margin: 0 0 10px; font-size: 17px; letter-spacing: 0; }}
+    h3 {{ margin: 0; font-size: 16px; letter-spacing: 0; }}
     .panel {{ padding: 18px; max-width: 920px; }}
     .onboarding {{
       display: grid;
@@ -940,6 +1166,22 @@ def _layout(active: str, title: str, subtitle: str, content: str,
     .summary-chip strong {{ display: block; margin-top: 5px; font-size: 17px; }}
     .suggested-actions {{ display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }}
     .mini-grid {{ display: grid; grid-template-columns: repeat(2, minmax(160px, 1fr)); gap: 10px; }}
+    .mobile-cards {{ display: none; }}
+    .decision-card-list {{ display: grid; gap: 10px; }}
+    .decision-card {{
+      display: grid;
+      gap: 10px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+    }}
+    .decision-card > div:first-child {{ display: flex; align-items: center; justify-content: space-between; gap: 10px; }}
+    .decision-card p {{ margin: 0; color: var(--muted); }}
+    .decision-card dl {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 0; }}
+    .decision-card dl div {{ padding: 8px; border-radius: 8px; background: var(--panel-soft); }}
+    .decision-card dt {{ color: var(--muted); font-size: 12px; }}
+    .decision-card dd {{ margin: 3px 0 0; font-weight: 650; }}
     .note-list {{ margin: 8px 0 0; padding-left: 18px; color: var(--muted); }}
     .path {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; overflow-wrap: anywhere; }}
     .option-row, .segment-row {{
@@ -954,6 +1196,42 @@ def _layout(active: str, title: str, subtitle: str, content: str,
     }}
     .option-row input, .segment-row input {{ width: auto; min-height: auto; }}
     .segments {{ display: grid; grid-template-columns: repeat(4, minmax(120px, 1fr)); gap: 10px; }}
+    .factor-market {{ max-width: 1080px; }}
+    .factor-filters {{
+      display: grid;
+      grid-template-columns: minmax(220px, 1.2fr) repeat(3, minmax(130px, 0.7fr)) auto;
+      gap: 10px;
+      align-items: end;
+      margin-bottom: 14px;
+    }}
+    .factor-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }}
+    .factor-card {{
+      display: grid;
+      gap: 10px;
+      min-height: 260px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel-soft);
+    }}
+    .factor-card-top {{ display: flex; justify-content: space-between; gap: 8px; align-items: center; }}
+    .factor-source, .factor-state, .factor-tags span {{
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: #fff;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 650;
+    }}
+    .factor-state.enabled {{ background: #eef8f2; color: var(--green); }}
+    .factor-state.local {{ background: #eef5ff; color: #0057d9; }}
+    .factor-card p {{ margin: 0; color: var(--muted); }}
+    .factor-tags {{ display: flex; flex-wrap: wrap; gap: 6px; }}
+    .factor-card summary {{ cursor: pointer; font-weight: 650; }}
+    .market-empty {{ padding: 24px; border: 1px solid var(--line); border-radius: 8px; }}
     .actions {{ margin-top: 16px; }}
     button {{
       min-height: 40px;
@@ -973,6 +1251,15 @@ def _layout(active: str, title: str, subtitle: str, content: str,
       color: var(--text);
     }}
     button.secondary:hover {{ background: var(--panel-soft); }}
+    button.tiny {{
+      min-height: 28px;
+      padding: 0 9px;
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 600;
+    }}
+    .feedback-buttons {{ display: flex; flex-wrap: wrap; gap: 6px; }}
+    .mobile-tabbar {{ display: none; }}
     .table-wrap {{
       overflow-x: auto;
       background: var(--panel);
@@ -1017,9 +1304,37 @@ def _layout(active: str, title: str, subtitle: str, content: str,
       .onboarding {{ grid-template-columns: 1fr; }}
       .setup-progress {{ width: fit-content; }}
       .form-grid, .segments, .console-grid, .mini-grid {{ grid-template-columns: 1fr; }}
+      .factor-filters {{ grid-template-columns: 1fr; }}
       .metrics {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
       button {{ width: 100%; }}
+      button.tiny {{ width: auto; }}
       .suggested-actions {{ display: grid; grid-template-columns: 1fr; }}
+      .mobile-cards {{ display: block; }}
+      .mobile-tabbar {{
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        z-index: 20;
+        display: grid;
+        grid-template-columns: repeat(5, 1fr);
+        gap: 4px;
+        padding: 7px 8px calc(7px + env(safe-area-inset-bottom));
+        border-top: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.96);
+      }}
+      .mobile-tabbar a {{
+        min-height: 42px;
+        display: grid;
+        place-items: center;
+        border-radius: 8px;
+        color: var(--muted);
+        text-decoration: none;
+        font-size: 12px;
+        font-weight: 650;
+      }}
+      .mobile-tabbar a.active {{ background: var(--nav-active); color: #0057d9; }}
+      main {{ padding-bottom: calc(96px + env(safe-area-inset-bottom)); }}
     }}
     @media (max-width: 480px) {{
       .metrics {{ grid-template-columns: 1fr; }}
@@ -1045,6 +1360,7 @@ def _layout(active: str, title: str, subtitle: str, content: str,
       </main>
     </div>
   </div>
+  {_mobile_tabbar(active)}
   <script>
   (() => {{
     const resultBox = document.getElementById("console-result");
@@ -1126,6 +1442,9 @@ def _layout(active: str, title: str, subtitle: str, content: str,
       }}
     }});
   }})();
+  if ("serviceWorker" in navigator) {{
+    navigator.serviceWorker.register("/service-worker.js").catch(() => {{}});
+  }}
   </script>
 </body>
 </html>"""
@@ -1135,10 +1454,12 @@ def render_home(data: dict, settings: dict[str, str], notice: str = "") -> str:
     content = f"""
     {_onboarding_panel(data, settings)}
     <div class="metrics">{_summary_cards(data)}</div>
+    {_decision_cards(data['decisions'])}
     {_report_table(data['report'])}
     {_decisions_table(data['decisions'])}
     {_positions_table(data['positions'])}
     {_alerts_table(data['price_alerts'])}
+    {_feedback_table(data['feedback'])}
     {_runs_table(data['runs'])}
     <footer>仅供研究复盘，不构成投资建议。数据来自本地 SQLite 记录。</footer>
     """
@@ -1282,6 +1603,39 @@ def render_channel_settings(settings: dict[str, str], notice: str = "") -> str:
     return _layout("channels", "通知渠道", "配置飞书或切换为仅 Web 控制台", content, settings, notice)
 
 
+def render_remote_settings(settings: dict[str, str], notice: str = "") -> str:
+    token_state = _mask_secret(settings.get("WEB_AUTH_TOKEN", ""))
+    content = f"""
+    <section class="panel">
+      <h2>远程访问保护</h2>
+      <form method="post" action="/settings/remote">
+        <div class="form-grid">
+          {_field("Web 访问 Token", f"<input type='password' name='web_auth_token' placeholder='留空不修改，当前：{_e(token_state)}'>", "设置后访问 Web UI 需要先登录；也可用 ?token= 或 X-StockWatch-Token 访问 API", wide=True)}
+        </div>
+        <label class="option-row"><input type="checkbox" name="clear_web_auth_token" value="true">清空 Web 访问 Token</label>
+        {_save_button("保存远程访问设置")}
+      </form>
+    </section>
+    <section class="panel">
+      <h2>监听地址</h2>
+      <ul class="note-list">
+        <li>默认本机访问：<code>python main.py dashboard</code>，只监听 <code>127.0.0.1:8765</code>。</li>
+        <li>局域网手机访问：先设置 Web Token，再运行 <code>python main.py dashboard --host 0.0.0.0</code>。</li>
+        <li>不要把没有 Token 的 Web UI 暴露到公网；配置页里可能有模型 Key、通知凭证和持仓成本。</li>
+      </ul>
+    </section>
+    <section class="panel">
+      <h2>出门在外访问</h2>
+      <ul class="note-list">
+        <li>自用优先：Tailscale Serve，把访问限制在自己的 tailnet 设备里。</li>
+        <li>公开域名：Cloudflare Tunnel + Cloudflare Access，在 Web UI 前加身份验证。</li>
+        <li>临时演示：ngrok 隧道，适合短时间测试，不建议长期裸奔。</li>
+      </ul>
+    </section>
+    """
+    return _layout("remote", "远程访问", "设置访问保护，并选择局域网或穿透方案", content, settings, notice)
+
+
 def render_feature_settings(settings: dict[str, str], notice: str = "") -> str:
     levels = {item.strip() for item in settings.get("ALERT_LEVELS", "").split(",") if item.strip()}
     def level_checkbox(value: str, label: str) -> str:
@@ -1334,21 +1688,78 @@ def render_personalization_settings(settings: dict[str, str], notice: str = "") 
     return _layout("personalization", "个性化", "调整机器人回答方式", content, settings, notice)
 
 
-def render_factor_settings(settings: dict[str, str], notice: str = "") -> str:
-    custom_rows = "".join(
-        "<tr>"
-        f"<td>{_e(item.get('uploaded_at'))}</td>"
-        f"<td>{_e(item.get('name'))}</td>"
-        f"<td>{_e(item.get('license'))}</td>"
-        f"<td>{_e('准备贡献' if item.get('share_to_community') else '本地草稿')}</td>"
-        f"<td class='path'>{_e(item.get('file'))}</td>"
-        "</tr>"
-        for item in load_custom_factors()
-    )
-    upload_table = _table("已上传因子", ["时间", "名称", "协议", "状态", "文件"], custom_rows)
+def _option_values(items: list[dict], key: str) -> list[str]:
+    return sorted({str(item.get(key) or "") for item in items if item.get(key)})
+
+
+def _market_select(name: str, current: str, values: list[str], empty_label: str) -> str:
+    options = [(value, value) for value in values]
+    return _select(name, current, [("", empty_label), *options])
+
+
+def _factor_cards(items: list[dict]) -> str:
+    cards = []
+    for item in items:
+        enabled = bool(item.get("enabled"))
+        status = "已启用" if enabled else "本地入库" if item.get("source") == "用户上传" else "未启用"
+        status_cls = "enabled" if enabled else "local" if item.get("source") == "用户上传" else ""
+        extra = ""
+        if item.get("file"):
+            extra = f"<div class='path'>{_e(item.get('file'))}</div>"
+        executable_note = "可通过上方开关参与分析" if item.get("executable") else "已进入本地因子库，默认不执行上传代码"
+        cards.append(f"""
+        <article class="factor-card">
+          <div class="factor-card-top">
+            <span class="factor-source">{_e(item.get('source'))}</span>
+            <span class="factor-state {status_cls}">{_e(status)}</span>
+          </div>
+          <h3>{_e(item.get('name'))}</h3>
+          <p>{_e(item.get('description'))}</p>
+          <div class="factor-tags">
+            <span>{_e(item.get('category'))}</span>
+            <span>{_e(item.get('horizon'))}</span>
+            <span>{_e(item.get('license', '内置'))}</span>
+          </div>
+          <details>
+            <summary>查看介绍和数据要求</summary>
+            <p>{_e(executable_note)}</p>
+            <p>数据要求：{_e(item.get('data_requirements'))}</p>
+            {extra}
+          </details>
+        </article>
+        """)
+    if not cards:
+        return "<div class='empty market-empty'>没有匹配的因子。</div>"
+    return "".join(cards)
+
+
+def render_factor_settings(settings: dict[str, str], notice: str = "", filters: dict[str, str] | None = None) -> str:
+    filters = filters or {}
+    full_catalog = load_factor_catalog(settings)
+    catalog = load_factor_catalog(settings, filters)
+    category_select = _market_select("category", filters.get("category", ""), _option_values(full_catalog, "category"), "全部类型")
+    source_select = _market_select("source", filters.get("source", ""), _option_values(full_catalog, "source"), "全部来源")
+    status_select = _select("status", filters.get("status", ""), [
+        ("", "全部状态"),
+        ("enabled", "只看已启用"),
+        ("local", "只看本地上传"),
+    ])
     content = f"""
-    <section class="panel">
+    <section class="panel factor-market">
       <h2>因子市场</h2>
+      <form method="get" action="/settings/factors" class="factor-filters">
+        <input name="q" value="{_e(filters.get('q', ''))}" placeholder="搜索名称、分类、说明">
+        {category_select}
+        {source_select}
+        {status_select}
+        <button type="submit">筛选</button>
+      </form>
+      <div class="factor-grid">
+        {_factor_cards(catalog)}
+      </div>
+    </section>
+    <section class="panel">
+      <h2>启用内置因子</h2>
       <form method="post" action="/settings/factors">
         <div class="options">
           <label class="option-row"><input type="checkbox" name="enable_regime" value="true"{_checked(settings.get('ENABLE_REGIME', 'false'))}>市场状态因子</label>
@@ -1361,11 +1772,14 @@ def render_factor_settings(settings: dict[str, str], notice: str = "") -> str:
       </form>
     </section>
     <section class="panel">
-      <h2>上传因子</h2>
+      <h2>上传因子到本地库</h2>
       <form method="post" action="/settings/factors/upload" enctype="multipart/form-data">
         <div class="form-grid">
           {_field("因子名称", "<input name='factor_name' placeholder='例如：资金流反转因子'>")}
+          {_field("分类", _select("factor_category", "自定义", [("技术面", "技术面"), ("资金流", "资金流"), ("消息面", "消息面"), ("基本面", "基本面"), ("风控", "风控"), ("板块轮动", "板块轮动"), ("自定义", "自定义")]))}
+          {_field("适用周期", _select("factor_horizon", "自定义", [("日内", "日内"), ("1-5 日", "1-5 日"), ("5-20 日", "5-20 日"), ("中线", "中线"), ("复盘", "复盘"), ("自定义", "自定义")]))}
           {_field("开源协议", _select("factor_license", "MIT", [("MIT", "MIT"), ("Apache-2.0", "Apache-2.0"), ("BSD-3-Clause", "BSD-3-Clause"), ("Proprietary", "暂不公开")]))}
+          {_field("数据要求", "<input name='factor_data_requirements' placeholder='例如：日 K、成交额、北向资金'>", wide=True)}
           {_field("说明", "<textarea name='factor_description' placeholder='简要说明输入数据、计算逻辑和适用场景'></textarea>", wide=True)}
           {_field("因子文件", "<input type='file' name='factor_file' accept='.py,.json,.md,.txt'>", "仅保存为本地贡献包，不会自动执行未审核代码", wide=True)}
         </div>
@@ -1376,12 +1790,11 @@ def render_factor_settings(settings: dict[str, str], notice: str = "") -> str:
     <section class="panel">
       <h2>社区贡献</h2>
       <ul class="note-list">
-        <li>上传文件会和说明一起保存为本地贡献包。</li>
+        <li>上传文件会和分类、周期、说明一起进入本地因子库。</li>
         <li>准备贡献的因子可以从本地目录提交 PR，后续可做一键发布到社区市场。</li>
         <li>为了安全，Web UI 不会直接执行用户上传的 Python 因子代码。</li>
       </ul>
     </section>
-    {upload_table}
     """
     return _layout("factors", "因子市场", "选择参与分析的增强因子", content, settings, notice)
 
@@ -1444,6 +1857,15 @@ def _updates_for_route(route: str, params: dict[str, list[str]]) -> dict[str, st
             if value:
                 updates[env_key] = value
         return updates
+    if route == "/settings/remote":
+        updates = {}
+        if _bool_param(params, "clear_web_auth_token") == "true":
+            updates["WEB_AUTH_TOKEN"] = ""
+        else:
+            token = _first(params, "web_auth_token").strip()
+            if token:
+                updates["WEB_AUTH_TOKEN"] = token
+        return updates
     if route == "/settings/watchlist":
         codes = re.findall(r"\d{6}", _first(params, "watchlist"))
         return {
@@ -1475,8 +1897,9 @@ def _updates_for_route(route: str, params: dict[str, list[str]]) -> dict[str, st
     return {}
 
 
-def _render_route(route: str, storage: Storage, notice: str = "") -> str:
+def _render_route(route: str, storage: Storage, notice: str = "", query_params: dict[str, list[str]] | None = None) -> str:
     settings = load_settings()
+    query_params = query_params or {}
     if route == "/":
         return render_home(load_dashboard_data(storage), settings, notice)
     if route == "/console":
@@ -1487,65 +1910,215 @@ def _render_route(route: str, storage: Storage, notice: str = "") -> str:
         return render_model_settings(settings, notice)
     if route == "/settings/channels":
         return render_channel_settings(settings, notice)
+    if route == "/settings/remote":
+        return render_remote_settings(settings, notice)
     if route == "/settings/features":
         return render_feature_settings(settings, notice)
     if route == "/settings/personalization":
         return render_personalization_settings(settings, notice)
     if route == "/settings/factors":
-        return render_factor_settings(settings, notice)
+        filters = {
+            "q": _first(query_params, "q"),
+            "category": _first(query_params, "category"),
+            "source": _first(query_params, "source"),
+            "status": _first(query_params, "status"),
+        }
+        return render_factor_settings(settings, notice, filters)
     raise KeyError(route)
+
+
+def render_login(next_url: str = "/", error: str = "") -> str:
+    error_html = f"<div class='error-box'>{_e(error)}</div>" if error else ""
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>登录 · StockWatch</title>
+  <style>
+    body {{ margin: 0; min-height: 100vh; display: grid; place-items: center; background: #f5f5f7; color: #1d1d1f; font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
+    .login {{ width: min(420px, calc(100vw - 32px)); padding: 22px; border: 1px solid #d6d6dc; border-radius: 8px; background: #fff; }}
+    h1 {{ margin: 0 0 8px; font-size: 24px; }}
+    p {{ margin: 0 0 16px; color: #6e6e73; }}
+    input {{ width: 100%; min-height: 42px; box-sizing: border-box; padding: 8px 10px; border: 1px solid #d6d6dc; border-radius: 8px; font: inherit; font-size: 16px; }}
+    button {{ width: 100%; min-height: 42px; margin-top: 12px; border: 0; border-radius: 8px; background: #1d1d1f; color: #fff; font-weight: 650; }}
+    .error-box {{ margin-bottom: 12px; padding: 10px 12px; border-radius: 8px; background: #fff4e5; color: #8a4f00; }}
+  </style>
+</head>
+<body>
+  <form class="login" method="post" action="/login">
+    <h1>StockWatch</h1>
+    <p>输入 Web 访问 Token 后继续。</p>
+    {error_html}
+    <input type="hidden" name="next" value="{_e(next_url or '/')}">
+    <input type="password" name="token" placeholder="Web 访问 Token" autofocus>
+    <button type="submit">登录</button>
+  </form>
+</body>
+</html>"""
+
+
+def manifest_json() -> bytes:
+    return json.dumps({
+        "name": "StockWatch",
+        "short_name": "StockWatch",
+        "start_url": "/",
+        "scope": "/",
+        "display": "standalone",
+        "background_color": "#f5f5f7",
+        "theme_color": "#ffffff",
+        "description": "A 股自选股盯盘提醒和风险复核工具",
+        "icons": [
+            {"src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable"},
+        ],
+    }, ensure_ascii=False).encode("utf-8")
+
+
+def service_worker_js() -> bytes:
+    return b"""self.addEventListener('install', event => self.skipWaiting());
+self.addEventListener('activate', event => event.waitUntil(self.clients.claim()));
+"""
+
+
+def icon_svg() -> bytes:
+    return b"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+<rect width="128" height="128" rx="24" fill="#1d1d1f"/>
+<path d="M24 84h18l13-30 19 44 16-34h14" fill="none" stroke="#6ee7b7" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="92" cy="38" r="10" fill="#0a84ff"/>
+</svg>"""
+
+
+def _record_feedback(params: dict[str, list[str]], storage: Storage) -> str:
+    label = _first(params, "label").strip()
+    if label not in {"有用", "误报", "看不懂"}:
+        raise ValueError("未知反馈类型")
+    source = _first(params, "source", "decision")[:40]
+    source_id = _first(params, "source_id")
+    source = f"{source}:{source_id}" if source_id else source
+    storage.insert_alert_feedback({
+        "user_id": WEB_USER_ID,
+        "source": source,
+        "code": _first(params, "code")[:16],
+        "label": label,
+        "note": _first(params, "note")[:200],
+    })
+    return "反馈已记录，会用于后续提醒质量复盘。"
 
 
 def make_handler(storage: Storage):
     class Handler(BaseHTTPRequestHandler):
+        def _send_bytes(self, body: bytes, content_type: str, status: int = 200, headers: dict[str, str] | None = None):
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            for key, value in (headers or {}).items():
+                self.send_header(key, value)
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _redirect(self, location: str, headers: dict[str, str] | None = None):
+            self.send_response(303)
+            self.send_header("Location", location)
+            for key, value in (headers or {}).items():
+                self.send_header(key, value)
+            self.end_headers()
+
+        def _require_auth(self, parsed) -> bool:
+            params = parse_qs(parsed.query)
+            if _is_authorized(self.headers, params):
+                return True
+            if parsed.path.startswith("/api"):
+                body = json.dumps({"ok": False, "error": "需要登录"}, ensure_ascii=False).encode("utf-8")
+                self._send_bytes(body, "application/json; charset=utf-8", status=401)
+                return False
+            next_url = parsed.path + (f"?{parsed.query}" if parsed.query else "")
+            self._redirect(f"/login?next={quote(next_url, safe='')}")
+            return False
+
         def do_GET(self):
             parsed = urlparse(self.path)
             route = parsed.path
+            if route == "/health":
+                self._send_bytes(b"ok", "text/plain; charset=utf-8")
+                return
+            if route == "/manifest.json":
+                self._send_bytes(manifest_json(), "application/manifest+json; charset=utf-8")
+                return
+            if route == "/service-worker.js":
+                self._send_bytes(service_worker_js(), "text/javascript; charset=utf-8")
+                return
+            if route == "/icon.svg":
+                self._send_bytes(icon_svg(), "image/svg+xml")
+                return
+            if route == "/login":
+                params = parse_qs(parsed.query)
+                next_url = _first(params, "next", "/") or "/"
+                if not _web_auth_token():
+                    self._redirect(next_url)
+                    return
+                if _web_auth_token() and _is_authorized(self.headers, params):
+                    self._redirect(next_url)
+                    return
+                self._send_bytes(render_login(next_url).encode("utf-8"), "text/html; charset=utf-8")
+                return
+            if route == "/logout":
+                self._redirect("/login", {"Set-Cookie": f"{AUTH_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax"})
+                return
             if route not in {
                 "/",
                 "/console",
                 "/api.json",
-                "/health",
                 "/settings/watchlist",
                 "/settings/model",
                 "/settings/channels",
+                "/settings/remote",
                 "/settings/features",
                 "/settings/personalization",
                 "/settings/factors",
             }:
                 self.send_error(404)
                 return
-            if route == "/health":
-                body = b"ok"
-                self.send_response(200)
-                self.send_header("Content-Type", "text/plain; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
+            if not self._require_auth(parsed):
                 return
             if route == "/api.json":
                 data = load_dashboard_data(storage)
                 body = json.dumps(data, ensure_ascii=False, default=str).encode("utf-8")
                 content_type = "application/json; charset=utf-8"
             else:
-                notice = "设置已保存；已运行的守护进程或 Bot 需要重启后读取新配置。" if parse_qs(parsed.query).get("saved") else ""
-                body = _render_route(route, storage, notice).encode("utf-8")
+                params = parse_qs(parsed.query)
+                notice = ""
+                if params.get("saved"):
+                    notice = "设置已保存；已运行的守护进程或 Bot 需要重启后读取新配置。"
+                if params.get("feedback"):
+                    notice = "反馈已记录，会用于后续提醒质量复盘。"
+                body = _render_route(route, storage, notice, params).encode("utf-8")
                 content_type = "text/html; charset=utf-8"
-            self.send_response(200)
-            self.send_header("Content-Type", content_type)
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._send_bytes(body, content_type)
 
         def do_POST(self):
             parsed = urlparse(self.path)
             route = parsed.path
+            if route == "/login":
+                length = int(self.headers.get("Content-Length") or "0")
+                raw = self.rfile.read(length)
+                params, _ = _parse_form_data(self.headers, raw)
+                token = _web_auth_token()
+                supplied = _first(params, "token").strip()
+                next_url = _first(params, "next", "/") or "/"
+                if token and secrets.compare_digest(supplied, token):
+                    self._redirect(next_url, {"Set-Cookie": f"{AUTH_COOKIE}={supplied}; Path=/; HttpOnly; SameSite=Lax"})
+                    return
+                body = render_login(next_url, "Token 不正确").encode("utf-8")
+                self._send_bytes(body, "text/html; charset=utf-8", status=401)
+                return
             if route not in {
                 "/api/console",
                 "/console",
+                "/feedback",
                 "/settings/watchlist",
                 "/settings/model",
                 "/settings/channels",
+                "/settings/remote",
                 "/settings/features",
                 "/settings/personalization",
                 "/settings/factors",
@@ -1553,17 +2126,28 @@ def make_handler(storage: Storage):
             }:
                 self.send_error(404)
                 return
+            if not self._require_auth(parsed):
+                return
             length = int(self.headers.get("Content-Length") or "0")
             raw = self.rfile.read(length)
             params, files = _parse_form_data(self.headers, raw)
+            if route == "/feedback":
+                try:
+                    _record_feedback(params, storage)
+                    referer = self.headers.get("Referer") or "/"
+                    ref = urlparse(referer)
+                    location = ref.path or "/"
+                    if ref.query:
+                        location += f"?{ref.query}"
+                    sep = "&" if "?" in location else "?"
+                    self._redirect(f"{location}{sep}feedback=1")
+                except ValueError as exc:
+                    self._send_bytes(str(exc).encode("utf-8"), "text/plain; charset=utf-8", status=400)
+                return
             if route == "/api/console":
                 result = _run_web_action(params, storage)
                 body = json.dumps(result, ensure_ascii=False, default=str).encode("utf-8")
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
+                self._send_bytes(body, "application/json; charset=utf-8")
                 return
             if route == "/console":
                 result = _run_web_action(params, storage)
@@ -1572,11 +2156,7 @@ def make_handler(storage: Storage):
                     storage, settings, result=result,
                     question=_first(params, "question"),
                 ).encode("utf-8")
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
+                self._send_bytes(body, "text/html; charset=utf-8")
                 return
             if route == "/settings/factors/upload":
                 try:
@@ -1584,16 +2164,16 @@ def make_handler(storage: Storage):
                 except ValueError as exc:
                     notice = str(exc)
                 body = _render_route("/settings/factors", storage, notice).encode("utf-8")
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
+                self._send_bytes(body, "text/html; charset=utf-8")
                 return
-            save_settings(_updates_for_route(route, params))
-            self.send_response(303)
-            self.send_header("Location", f"{route}?saved=1")
-            self.end_headers()
+            updates = _updates_for_route(route, params)
+            save_settings(updates)
+            headers = {}
+            if route == "/settings/remote" and updates.get("WEB_AUTH_TOKEN"):
+                headers["Set-Cookie"] = f"{AUTH_COOKIE}={updates['WEB_AUTH_TOKEN']}; Path=/; HttpOnly; SameSite=Lax"
+            if route == "/settings/remote" and "WEB_AUTH_TOKEN" in updates and not updates["WEB_AUTH_TOKEN"]:
+                headers["Set-Cookie"] = f"{AUTH_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax"
+            self._redirect(f"{route}?saved=1", headers)
 
         def log_message(self, fmt, *args):
             return
@@ -1606,6 +2186,9 @@ def run_dashboard(host: str = "127.0.0.1", port: int = 8765):
     storage = Storage()
     server = ThreadingHTTPServer((host, port), make_handler(storage))
     print(f"StockWatch dashboard: http://{host}:{port}")
+    if host in {"0.0.0.0", "::"} and not _web_auth_token():
+        print("WARNING: dashboard is listening on all interfaces without WEB_AUTH_TOKEN.")
+        print("Set WEB_AUTH_TOKEN before exposing this service to LAN or tunnels.")
     server.serve_forever()
 
 

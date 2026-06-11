@@ -134,6 +134,15 @@ class Storage:
             title TEXT,
             sent_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS alert_feedback (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT,
+            source TEXT,
+            code TEXT,
+            label TEXT NOT NULL,
+            note TEXT,
+            created_at TEXT NOT NULL
+        );
         """)
 
     @staticmethod
@@ -492,3 +501,26 @@ class Storage:
                 INSERT OR IGNORE INTO alert_events (event_key, event_type, code, title, sent_at)
                 VALUES (?, ?, ?, ?, ?)
             """, [event_key, event_type, code, title, datetime.now().isoformat()])
+
+    def insert_alert_feedback(self, row: dict):
+        with self._conn() as conn:
+            conn.execute("""
+                INSERT INTO alert_feedback (user_id, source, code, label, note, created_at)
+                VALUES (:user_id, :source, :code, :label, :note, :created_at)
+            """, {
+                "user_id": row.get("user_id", ""),
+                "source": row.get("source", ""),
+                "code": row.get("code", ""),
+                "label": row["label"],
+                "note": row.get("note", ""),
+                "created_at": row.get("created_at", datetime.now().isoformat()),
+            })
+
+    def get_recent_alert_feedback(self, limit: int = 30) -> list[dict]:
+        with self._conn() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute("""
+                SELECT * FROM alert_feedback
+                ORDER BY created_at DESC, id DESC LIMIT ?
+            """, [limit]).fetchall()
+        return [dict(r) for r in rows]
