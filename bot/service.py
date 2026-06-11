@@ -55,7 +55,7 @@ class BotService:
             "stop_loss": decision.get("stop_loss", 0),
             "target_price": decision.get("target_price", 0),
         })
-        extra = [f"已开始跟踪：买入价 {buy_price:.2f}元"]
+        extra = [f"已开始跟踪：成本价 {buy_price:.2f}元"]
         if quantity:
             extra.append(f"数量：{quantity:g}股")
         extra.extend(self._position_pnl_lines(quote, buy_price))
@@ -79,21 +79,21 @@ class BotService:
             "name": name,
             "trigger_price": trigger_price,
             "quantity": quantity,
-            "note": "跌到目标价提醒加仓",
+            "note": "跌到关键价提醒观察",
         })
-        lines = [f"已盯 `{name}({code})`：跌到 {trigger_price:.2f} 元提醒加仓。"]
+        lines = [f"已盯 `{name}({code})`：跌到 {trigger_price:.2f} 元提醒观察。"]
         if quantity:
             lines.append(f"计划数量：{quantity:g}股")
         if quote:
             lines.append(f"当前价：{quote.get('close', 0):.2f}元，今日涨跌：{quote.get('pct_change', 0):+.2f}%")
-        lines.append("触价时会顺带看盘口卖压，卖压重会提示先别急/考虑撤单。")
-        return render_text_card("加仓盯价已设置", lines, template="green")
+        lines.append("触价时会顺带看盘口卖压，卖压重会提示先复核风险。")
+        return render_text_card("关键价提醒已设置", lines, template="green")
 
     def cancel_price_alert(self, user_id: str, code: str) -> dict:
         count = self.storage.close_price_alert(user_id, code)
         if count:
-            return render_text_card("已取消盯价", [f"已取消 `{code}` 的加仓盯价。"], template="green")
-        return render_text_card("未找到盯价", [f"`{code}` 没有正在生效的加仓盯价。"], template="orange")
+            return render_text_card("已取消盯价", [f"已取消 `{code}` 的关键价提醒。"], template="green")
+        return render_text_card("未找到盯价", [f"`{code}` 没有正在生效的关键价提醒。"], template="orange")
 
     def _analyze_stock(self, code: str) -> tuple[dict, dict]:
         reset_token_usage()

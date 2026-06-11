@@ -287,9 +287,9 @@ def _console_summary_and_actions(title: str, text: str) -> tuple[list[dict], lis
     code = code_match.group(1) if code_match else ""
     action = "观察"
     if re.search(r"\bBUY\b|推荐买入|建议买入|可关注机会|买入", text):
-        action = "关注买入"
+        action = "机会观察"
     if re.search(r"\bSELL\b|推荐卖出|建议卖出|减仓|离场|风险变高", text):
-        action = "复核卖出"
+        action = "风险复核"
     if "HOLD" in text or "暂不操作" in text:
         action = "继续观察"
 
@@ -301,16 +301,16 @@ def _console_summary_and_actions(title: str, text: str) -> tuple[list[dict], lis
     resistance = _extract_price(text, [r"压力\s*([0-9]+(?:\.[0-9]+)?)"])
     current = _extract_price(text, [r"现价：\s*([0-9]+(?:\.[0-9]+)?)", r"当前价：\s*([0-9]+(?:\.[0-9]+)?)"])
 
-    summary = [{"label": "AI 建议", "value": action}]
+    summary = [{"label": "提醒类型", "value": action}]
     if code:
         summary.append({"label": "标的", "value": code})
     if confidence:
         summary.append({"label": "置信度", "value": confidence})
     for label, value in [
         ("现价", current),
-        ("参考买入", buy_price),
-        ("止损", stop_loss),
-        ("目标", target),
+        ("观察价", buy_price),
+        ("风险价", stop_loss),
+        ("压力位", target),
         ("支撑", support),
         ("压力", resistance),
     ]:
@@ -319,9 +319,9 @@ def _console_summary_and_actions(title: str, text: str) -> tuple[list[dict], lis
 
     actions = []
     track_price = buy_price or current
-    if code and track_price and action in {"关注买入", "继续观察"}:
+    if code and track_price and action in {"机会观察", "继续观察"}:
         actions.append({
-            "label": "按参考价跟踪持仓",
+            "label": "按观察价跟踪",
             "params": {"console_action": "track_position", "code": code, "price": track_price},
         })
     alert_price = support or stop_loss or buy_price
@@ -359,13 +359,13 @@ def _run_web_command(text: str, storage: Storage) -> dict:
             return _card_to_result(service.research_stock(command.text or text, command.code))
         if command.action == "buy":
             if not command.price:
-                return _error_result("开始跟踪需要买入价，例如：买入 600519 1680")
+                return _error_result("持仓跟踪需要成本价，例如：买入 600519 1680")
             return _card_to_result(service.open_position(WEB_USER_ID, WEB_CHAT_ID, command.code, command.price, command.quantity))
         if command.action == "sell":
             return _card_to_result(service.close_position(WEB_USER_ID, command.code))
         if command.action == "price_alert":
             if not command.price:
-                return _error_result("盯价需要目标价，例如：盯买 600519 1500")
+                return _error_result("盯价需要关键价，例如：盯买 600519 1500")
             return _card_to_result(service.open_price_alert(WEB_USER_ID, WEB_CHAT_ID, command.code, command.price, command.quantity))
         if command.action == "cancel_price_alert":
             return _card_to_result(service.cancel_price_alert(WEB_USER_ID, command.code))
@@ -459,6 +459,15 @@ def _stat(value, suffix: str = "") -> str:
     return f"{value}{suffix}"
 
 
+def _action_label(action: str) -> str:
+    labels = {
+        "BUY": "机会观察",
+        "SELL": "风险复核",
+        "HOLD": "继续观察",
+    }
+    return labels.get(str(action or "").upper(), str(action or "-"))
+
+
 def _summary_cards(data: dict) -> str:
     latest_run = data["runs"][0] if data["runs"] else {}
     report = data.get("report", {})
@@ -499,7 +508,7 @@ def _decisions_table(rows: list[dict]) -> str:
         f"<td>{_date(row.get('run_ts'))}</td>"
         f"<td><code>{_e(row.get('code'))}</code></td>"
         f"<td>{_e(row.get('name'))}</td>"
-        f"<td><span class='pill {str(row.get('action', '')).lower()}'>{_e(row.get('action'))}</span></td>"
+        f"<td><span class='pill {str(row.get('action', '')).lower()}'>{_e(_action_label(row.get('action')))}</span></td>"
         f"<td>{_pct(row.get('confidence'))}</td>"
         f"<td>{_price(row.get('target_price'))}</td>"
         f"<td>{_price(row.get('stop_loss'))}</td>"
@@ -507,7 +516,7 @@ def _decisions_table(rows: list[dict]) -> str:
         "</tr>"
         for row in rows
     )
-    return _table("最近信号", ["时间", "代码", "名称", "动作", "置信度", "目标", "止损", "一句话"], body)
+    return _table("最近提醒", ["时间", "代码", "名称", "类型", "置信度", "压力位", "风险价", "一句话"], body)
 
 
 def _positions_table(rows: list[dict]) -> str:
@@ -523,7 +532,7 @@ def _positions_table(rows: list[dict]) -> str:
         "</tr>"
         for row in rows
     )
-    return _table("持仓跟踪", ["代码", "名称", "买入价", "数量", "止损", "目标", "开始时间"], body)
+    return _table("持仓跟踪", ["代码", "名称", "成本价", "数量", "风险价", "压力位", "开始时间"], body)
 
 
 def _alerts_table(rows: list[dict]) -> str:
@@ -545,7 +554,7 @@ def _report_table(report: dict) -> str:
     rows = report.get("by_action", {})
     body = "".join(
         "<tr>"
-        f"<td>{_e(action)}</td>"
+        f"<td>{_e(_action_label(action))}</td>"
         f"<td>{_e(stats.get('count', 0))}</td>"
         f"<td>{_pct(stats.get('hit_rate'))}</td>"
         f"<td>{float(stats.get('avg_return') or 0):+.2f}%</td>"
@@ -553,7 +562,7 @@ def _report_table(report: dict) -> str:
         "</tr>"
         for action, stats in rows.items()
     )
-    return _table("5日信号复盘", ["动作", "样本", "命中率", "平均收益", "中位收益"], body)
+    return _table("5日提醒复盘", ["类型", "样本", "命中率", "平均收益", "中位收益"], body)
 
 
 def _table(title: str, headers: list[str], body: str) -> str:
@@ -647,6 +656,49 @@ def _nav(active: str) -> str:
     return "".join(links)
 
 
+def _onboarding_panel(data: dict, settings: dict[str, str]) -> str:
+    watch_count = len(re.findall(r"\d{6}", settings.get("WATCHLIST", "")))
+    base_url = settings.get("LLM_BASE_URL", "")
+    model_ready = bool(settings.get("LLM_API_KEY")) or base_url.startswith(("http://127.0.0.1", "http://localhost"))
+    channel = settings.get("NOTIFY_CHANNEL", "feishu")
+    channel_ready = channel == "web" or all([
+        settings.get("FEISHU_APP_ID"),
+        settings.get("FEISHU_APP_SECRET"),
+        settings.get("FEISHU_RECEIVE_ID"),
+    ])
+    levels_ready = bool(settings.get("ALERT_LEVELS"))
+    watch_ready = bool(data.get("positions") or data.get("price_alerts"))
+    steps = [
+        ("添加自选股", watch_count > 0, f"当前 {watch_count} 只", "/settings/watchlist"),
+        ("配置模型", model_ready, "用于解释公告、新闻和问答", "/settings/model"),
+        ("选择通知方式", channel_ready, "可先用仅 Web 控制台", "/settings/channels"),
+        ("设置打扰级别", levels_ready, "先只收必须看和建议看", "/settings/features"),
+        ("添加持仓或关键价", watch_ready, "让系统围绕你的真实关注点提醒", "/console"),
+    ]
+    rows = []
+    for label, done, hint, href in steps:
+        cls = "step-row done" if done else "step-row"
+        status = "已完成" if done else "待设置"
+        rows.append(
+            f"<a class='{cls}' href='{href}'>"
+            f"<span class='step-status'>{status}</span>"
+            f"<strong>{_e(label)}</strong>"
+            f"<span>{_e(hint)}</span>"
+            "</a>"
+        )
+    ready_count = sum(1 for _, done, _, _ in steps if done)
+    return f"""
+    <section class="panel onboarding">
+      <div>
+        <h2>开始使用</h2>
+        <p>先完成这几步，就能把“持续盯盘”变成“有事再看”。</p>
+      </div>
+      <div class="setup-progress">{ready_count}/{len(steps)} 已完成</div>
+      <div class="step-list">{''.join(rows)}</div>
+    </section>
+    """
+
+
 def _layout(active: str, title: str, subtitle: str, content: str,
             settings: dict[str, str], notice: str = "") -> str:
     notice_html = f"<div class='notice'>{_e(notice)}</div>" if notice else ""
@@ -737,6 +789,57 @@ def _layout(active: str, title: str, subtitle: str, content: str,
     section {{ margin-top: 22px; }}
     h2 {{ margin: 0 0 10px; font-size: 17px; letter-spacing: 0; }}
     .panel {{ padding: 18px; max-width: 920px; }}
+    .onboarding {{
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 14px;
+      max-width: 1080px;
+      margin-top: 0;
+      margin-bottom: 20px;
+    }}
+    .onboarding p {{ margin: 0; color: var(--muted); }}
+    .setup-progress {{
+      align-self: start;
+      padding: 6px 10px;
+      border-radius: 8px;
+      background: var(--panel-soft);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 650;
+    }}
+    .step-list {{
+      grid-column: 1 / -1;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 10px;
+    }}
+    .step-row {{
+      display: grid;
+      gap: 5px;
+      min-height: 104px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel-soft);
+      color: var(--text);
+      text-decoration: none;
+    }}
+    .step-row:hover {{ border-color: var(--blue); }}
+    .step-row strong {{ font-size: 15px; }}
+    .step-row span:last-child {{ color: var(--muted); font-size: 12px; }}
+    .step-status {{
+      width: fit-content;
+      padding: 2px 7px;
+      border-radius: 999px;
+      background: #fff4e5;
+      color: var(--orange);
+      font-size: 12px;
+      font-weight: 650;
+    }}
+    .step-row.done .step-status {{
+      background: #eef8f2;
+      color: var(--green);
+    }}
     .form-grid {{ display: grid; grid-template-columns: repeat(2, minmax(220px, 1fr)); gap: 14px; }}
     .field {{ display: grid; gap: 7px; }}
     .field.wide {{ grid-column: 1 / -1; }}
@@ -750,6 +853,7 @@ def _layout(active: str, title: str, subtitle: str, content: str,
       background: #fff;
       color: var(--text);
       font: inherit;
+      font-size: 16px;
     }}
     input:focus, select:focus, textarea:focus {{
       border-color: var(--blue);
@@ -860,9 +964,29 @@ def _layout(active: str, title: str, subtitle: str, content: str,
     footer {{ margin-top: 22px; color: var(--muted); font-size: 12px; }}
     @media (max-width: 820px) {{
       .shell {{ display: block; }}
-      aside {{ width: auto; border-right: 0; border-bottom: 1px solid var(--line); }}
-      nav {{ grid-template-columns: repeat(3, 1fr); }}
+      aside {{ width: auto; border-right: 0; border-bottom: 1px solid var(--line); padding: 14px 12px; }}
+      .brand {{ padding-bottom: 12px; }}
+      nav {{
+        display: flex;
+        gap: 8px;
+        overflow-x: auto;
+        padding-bottom: 2px;
+        -webkit-overflow-scrolling: touch;
+      }}
+      nav a {{ flex: 0 0 auto; min-width: 88px; text-align: center; }}
+      header {{ padding-top: 18px; }}
+      main {{ padding-bottom: 28px; }}
+      .panel {{ max-width: none; }}
+      .onboarding {{ grid-template-columns: 1fr; }}
+      .setup-progress {{ width: fit-content; }}
       .form-grid, .segments, .console-grid, .mini-grid {{ grid-template-columns: 1fr; }}
+      .metrics {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+      button {{ width: 100%; }}
+      .suggested-actions {{ display: grid; grid-template-columns: 1fr; }}
+    }}
+    @media (max-width: 480px) {{
+      .metrics {{ grid-template-columns: 1fr; }}
+      .step-list {{ grid-template-columns: 1fr; }}
     }}
   </style>
 </head>
@@ -960,7 +1084,7 @@ def _layout(active: str, title: str, subtitle: str, content: str,
       try {{
         postConsole(JSON.parse(button.dataset.action || "{{}}"), button);
       }} catch (error) {{
-        renderResult({{ok: false, title: "操作失败", text: "推荐操作解析失败", summary: [], actions: []}});
+        renderResult({{ok: false, title: "操作失败", text: "操作解析失败", summary: [], actions: []}});
       }}
     }});
   }})();
@@ -971,6 +1095,7 @@ def _layout(active: str, title: str, subtitle: str, content: str,
 
 def render_home(data: dict, settings: dict[str, str], notice: str = "") -> str:
     content = f"""
+    {_onboarding_panel(data, settings)}
     <div class="metrics">{_summary_cards(data)}</div>
     {_report_table(data['report'])}
     {_decisions_table(data['decisions'])}
@@ -991,7 +1116,7 @@ def render_console(storage: Storage, settings: dict[str, str], result: dict | No
       <section class="panel">
         <h2>直接提问</h2>
         <form method="post" action="/console" data-console-form>
-          {_field("问题或命令", f"<textarea name='question' placeholder='例如：现在行情怎么样 / 600519 最近怎么样 / 盯买 600519 1500'>{_e(question)}</textarea>", wide=True)}
+          {_field("问题或命令", f"<textarea name='question' placeholder='例如：现在行情怎么样 / 600519 最近怎么样 / 盯买 600519 1500'>{_e(question)}</textarea>", "也可以输入：买入 600519 1680，用成本价开始持仓跟踪", wide=True)}
           {_save_button("发送")}
         </form>
         {result_html}
@@ -1002,7 +1127,7 @@ def render_console(storage: Storage, settings: dict[str, str], result: dict | No
           <input type="hidden" name="console_action" value="track_position">
           <div class="mini-grid">
             <input name="code" placeholder="代码 600519">
-            <input name="price" placeholder="买入价">
+            <input name="price" placeholder="成本价">
             <input name="quantity" placeholder="数量，可选">
           </div>
           <button type="submit">开始持仓跟踪</button>
@@ -1011,7 +1136,7 @@ def render_console(storage: Storage, settings: dict[str, str], result: dict | No
           <input type="hidden" name="console_action" value="price_alert">
           <div class="mini-grid">
             <input name="code" placeholder="代码 600519">
-            <input name="price" placeholder="触发价">
+            <input name="price" placeholder="关键价">
             <input name="quantity" placeholder="数量，可选">
           </div>
           <button type="submit">新增盯价提醒</button>
@@ -1132,7 +1257,7 @@ def render_feature_settings(settings: dict[str, str], notice: str = "") -> str:
         <div class="group-title">异动提醒分级</div>
         <div class="options">
           {level_checkbox("critical", "必须看：止损、强风险、重大负面")}
-          {level_checkbox("warning", "建议看：普通买卖信号、明显异动")}
+          {level_checkbox("warning", "建议看：机会观察、风险复核、明显异动")}
           {level_checkbox("info", "普通提醒：观察、记录、正面信息")}
         </div>
         <div class="options">

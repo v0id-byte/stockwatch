@@ -131,16 +131,25 @@ def _json_items(value: str, limit: int) -> list[str]:
     return [str(item) for item in items[:limit]]
 
 
+def _action_label(action: str) -> str:
+    labels = {
+        "BUY": "机会观察",
+        "SELL": "风险复核",
+        "HOLD": "继续观察",
+    }
+    return labels.get(str(action or "").upper(), str(action or "-"))
+
+
 def _advice_line(d: dict) -> str:
     action = d.get("action", "HOLD")
     if action == "BUY":
         return (
-            f"建议：按参考买入价 {_format_price(d.get('trade_price'))} 观察，"
-            f"跌破 {_format_price(d.get('stop_loss'))} 止损"
+            f"观察：参考价 {_format_price(d.get('trade_price'))} 附近再看，"
+            f"跌破 {_format_price(d.get('stop_loss'))} 复核风险"
         )
     if action == "SELL":
-        return f"建议：按参考卖出价 {_format_price(d.get('trade_price'))} 减仓或离场"
-    return "建议：暂不操作，继续观察"
+        return f"风险：参考价 {_format_price(d.get('trade_price'))} 附近复核仓位"
+    return "观察：暂不需要额外盯盘，继续跟踪"
 
 
 def _analysis_lines(d: dict) -> list[str]:
@@ -196,14 +205,14 @@ def _position_lines(d: dict) -> list[str]:
     action = d.get("action", "HOLD")
     if action == "BUY":
         trade_line = (
-            f"买入 {_format_price(d.get('trade_price'))} | "
-            f"目标卖出 {_format_price(d.get('target_price'))} | "
-            f"止损 {_format_price(d.get('stop_loss'))}"
+            f"观察价 {_format_price(d.get('trade_price'))} | "
+            f"压力位 {_format_price(d.get('target_price'))} | "
+            f"风险价 {_format_price(d.get('stop_loss'))}"
         )
     elif action == "SELL":
         trade_line = (
-            f"卖出 {_format_price(d.get('trade_price'))} | "
-            f"下方目标 {_format_price(d.get('target_price'))} | "
+            f"复核价 {_format_price(d.get('trade_price'))} | "
+            f"下方支撑 {_format_price(d.get('target_price'))} | "
             f"风控线 {_format_price(d.get('stop_loss'))}"
         )
     else:
@@ -234,14 +243,14 @@ def render_text_card(title: str, lines: list[str], template: str = "blue") -> di
 def render_single_decision_card(decision: dict, title: str = "股票即时分析",
                                 extra_lines: list[str] | None = None) -> dict:
     action = decision.get("action", "HOLD")
-    template = "red" if action == "BUY" else "orange" if action == "SELL" else "blue"
+    template = "green" if action == "BUY" else "orange" if action == "SELL" else "blue"
     conf = float(decision.get("confidence") or 0)
     raw_conf = decision.get("raw_confidence")
     raw_text = f"（原始 {raw_conf:.0%}）" if raw_conf is not None and abs(float(raw_conf) - conf) > 0.005 else ""
     reasons = json.loads(decision.get("reasons_json") or "[]")
     risks = json.loads(decision.get("risks_json") or "[]")
     lines = [
-        f"**{decision.get('name', decision.get('code'))}**({decision.get('code')}) {action}",
+        f"**{decision.get('name', decision.get('code'))}**({decision.get('code')}) {_action_label(action)}",
         f"置信度 {conf:.0%}{raw_text}",
         _advice_line(decision),
         *_position_lines(decision),
@@ -279,16 +288,16 @@ def render_card(run_id: str, decisions: list[dict], regime_info: dict | None = N
         logger.info("飞书卡片无可展示信号，跳过发送")
         return None
 
-    # 卡片头颜色：优先红>绿>蓝
+    # 卡片头颜色：优先高波动风险，再展示风险复核和机会观察。
     if regime_info and regime_info.get("regime") == "crisis":
         header_color = "red"
         header_title = "⚠️ 高波动风险提示"
-    elif any(d.get("action") == "BUY" for d in strong_signals):
-        header_color = "red"
-        header_title = "🔥 今日强烈推荐信号"
     elif any(d.get("action") == "SELL" for d in strong_signals):
         header_color = "orange"
-        header_title = "⚠️ 今日卖出信号"
+        header_title = "⚠️ 今日风险复核"
+    elif any(d.get("action") == "BUY" for d in strong_signals):
+        header_color = "green"
+        header_title = "📌 今日机会观察"
     else:
         header_color = "blue"
         header_title = "📌 今日持仓观察"
@@ -319,7 +328,7 @@ def render_card(run_id: str, decisions: list[dict], regime_info: dict | None = N
             stars = "⭐" * max(1, min(5, int(conf * 5)))
             raw_str = f" 原始 {raw_conf:.0%}" if raw_conf is not None and abs(raw_conf - conf) > 0.005 else ""
             body_lines = [
-                f"**{d['name']}**({d['code']}) {action}",
+                f"**{d['name']}**({d['code']}) {_action_label(action)}",
                 f"{stars} 校准置信度 {conf:.0%}{raw_str}",
                 _advice_line(d),
             ]
@@ -341,9 +350,9 @@ def render_card(run_id: str, decisions: list[dict], regime_info: dict | None = N
                 }
             })
 
-    add_signal_group("🔥", "强烈推荐", strong_signals)
-    add_signal_group("⚠️", "关注信号", watch_signals)
-    add_signal_group("📌", "持有不动", hold_notes)
+    add_signal_group("⚠️", "重点提醒", strong_signals)
+    add_signal_group("📌", "一般提醒", watch_signals)
+    add_signal_group("📌", "继续观察", hold_notes)
 
     # 卡片尾
     run_time = datetime.now().strftime("%Y-%m-%d %H:%M")
