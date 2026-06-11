@@ -113,6 +113,40 @@ class Config:
     def stop_loss_fallback_pct(self) -> float:
         return float(os.getenv("STOP_LOSS_FALLBACK_PCT", "0.07"))
 
+    @property
+    def enable_reassurance_mode(self) -> bool:
+        return _env_bool("ENABLE_REASSURANCE_MODE", False)
+
+    @property
+    def enable_family_brief(self) -> bool:
+        return _env_bool("ENABLE_FAMILY_BRIEF", False)
+
+    @property
+    def enable_after_close_summary(self) -> bool:
+        return _env_bool("ENABLE_AFTER_CLOSE_SUMMARY", self.enable_reassurance_mode)
+
+    @property
+    def alert_levels(self) -> set[str]:
+        raw = os.getenv("ALERT_LEVELS", "critical,warning,info").strip().lower()
+        if raw in {"", "all"}:
+            return {"critical", "warning", "info"}
+        aliases = {
+            "red": "critical",
+            "orange": "warning",
+            "yellow": "warning",
+            "blue": "info",
+            "green": "info",
+        }
+        levels = set()
+        for item in raw.split(","):
+            value = aliases.get(item.strip(), item.strip())
+            if value in {"critical", "warning", "info"}:
+                levels.add(value)
+        return levels
+
+    def alert_level_enabled(self, level: str) -> bool:
+        return str(level or "info").lower() in self.alert_levels
+
     # === v2 feature flags（默认关闭） ===
     @property
     def enable_calibration(self) -> bool:

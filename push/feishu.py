@@ -172,6 +172,26 @@ def _reason_line(d: dict) -> str:
     return "为什么：" + "；".join(reasons) if reasons else ""
 
 
+def _family_brief_line(d: dict) -> str:
+    try:
+        if not get_config().enable_family_brief:
+            return ""
+    except Exception:
+        return ""
+    if d.get("family_brief"):
+        return f"给家人看的结论：{d['family_brief']}"
+    name = d.get("name") or d.get("code") or "这只股票"
+    action = d.get("action", "HOLD")
+    one_liner = str(d.get("one_liner") or "")
+    if "跌破止损" in one_liner:
+        return f"给家人看的结论：{name} 跌到风险位了，今天需要看一下。"
+    if action == "SELL":
+        return f"给家人看的结论：{name} 风险变高，建议今天复核仓位。"
+    if action == "BUY":
+        return f"给家人看的结论：{name} 出现可关注机会，先看风险位，不用追涨。"
+    return f"给家人看的结论：{name} 暂时没有必须操作的信号，不用一直盯盘。"
+
+
 def _position_lines(d: dict) -> list[str]:
     action = d.get("action", "HOLD")
     if action == "BUY":
@@ -229,6 +249,9 @@ def render_single_decision_card(decision: dict, title: str = "股票即时分析
     ]
     if extra_lines:
         lines.extend(extra_lines)
+    family_brief = _family_brief_line(decision)
+    if family_brief:
+        lines.append(family_brief)
     if decision.get("one_liner"):
         lines.append(f"一句话：{decision['one_liner']}")
     if reasons:
@@ -305,6 +328,9 @@ def render_card(run_id: str, decisions: list[dict], regime_info: dict | None = N
             reason_text = _reason_line(d)
             if reason_text:
                 body_lines.append(reason_text)
+            family_brief = _family_brief_line(d)
+            if family_brief:
+                body_lines.append(family_brief)
             if d.get("one_liner"):
                 body_lines.append(f"📝 {d.get('one_liner', '—')}")
             elements.append({

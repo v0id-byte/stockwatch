@@ -22,6 +22,13 @@ from decision.engine import DecisionEngine
 from push.feishu import FeishuClient, render_card, render_text_card
 
 
+ALERT_LEVEL_LABELS = {
+    "critical": "红色/必须看",
+    "warning": "橙色/建议看",
+    "info": "蓝色/仅记录",
+}
+
+
 def _setup_log():
     cfg = get_config()
     logger.remove()
@@ -61,6 +68,75 @@ def _tracked_alert_reason(position: dict, decision: dict) -> str:
     if decision.get("action") == "SELL" and decision.get("confidence", 0) >= 0.6:
         return "持仓跟踪：模型转为 SELL，建议复核仓位"
     return ""
+
+
+def _decision_alert_level(decision: dict) -> str:
+    action = str(decision.get("action") or "HOLD").upper()
+    confidence = float(decision.get("confidence") or 0)
+    one_liner = str(decision.get("one_liner") or "")
+    if "跌破止损" in one_liner or "模型转为 SELL" in one_liner:
+        return "critical"
+    if action == "SELL" and confidence >= 0.75:
+        return "critical"
+    if action in {"BUY", "SELL"}:
+        return "warning"
+    return "info"
+
+
+def _is_after_close_summary_time(now: datetime | None = None) -> bool:
+    now = now or datetime.now()
+    if now.weekday() >= 5:
+        return False
+    return now.hour * 60 + now.minute >= 15 * 60
+
+
+def _after_close_summary_key(now: datetime | None = None) -> str:
+    now = now or datetime.now()
+    return f"after_close_summary:{now.date().isoformat()}"
+
+
+def _format_family_watch_line(decisions: list[dict]) -> str:
+    if not decisions:
+        return "给家人看的结论：今天没有必须盯着看的股票，收盘后看这条就够了。"
+    hold_count = sum(1 for d in decisions if d.get("action") == "HOLD")
+    return f"给家人看的结论：今天已检查 {len(decisions)} 只，其中 {hold_count} 只以观察为主，不需要一直盯盘。"
+
+
+def _send_after_close_summary(storage: Storage, feishu: FeishuClient,
+                              decisions: list[dict], pushed_alerts: list[dict],
+                              tracked_positions: list[dict], price_alerts: list[dict]) -> bool:
+    cfg = get_config()
+    if not (cfg.enable_after_close_summary or cfg.enable_reassurance_mode):
+        return False
+    if pushed_alerts or not _is_after_close_summary_time():
+        return False
+    key = _after_close_summary_key()
+    if storage.alert_event_exists(key):
+        return False
+
+    watch_lines = [_format_family_watch_line(decisions)] if cfg.enable_family_brief else [
+        f"今日已检查 {len(decisions)} 只，未触发需要立刻处理的提醒。"
+    ]
+    observe = []
+    for item in decisions[:3]:
+        name = item.get("name") or item.get("code")
+        line = item.get("one_liner") or item.get("tech_summary") or "继续观察"
+        observe.append(f"{name}({item.get('code')})：{line}")
+    if not observe:
+        observe.append("暂无需要单独关注的标的。")
+
+    card = render_text_card("今日不用盯盘", [
+        *watch_lines,
+        f"持仓跟踪：{len(tracked_positions)} 只；盯价提醒：{len(price_alerts)} 条。",
+        "系统会继续盯价格、公告、重大消息和模型转弱信号。",
+        "明日观察：",
+        *observe,
+        "*仅供研究参考，不构成投资建议*",
+    ], template="green")
+    ok = feishu.send_message(card)
+    if ok:
+        storage.mark_alert_event(key, "after_close_summary", "", "今日不用盯盘")
+    return ok
 
 
 def _is_intraday_monitor_time(now: datetime | None = None) -> bool:
@@ -128,6 +204,10 @@ def _monitor_price_alerts(storage: Storage, market: MarketData, feishu: FeishuCl
             continue
 
         heavy_pressure, pressure_text = _sell_pressure(quote)
+        level = "warning" if heavy_pressure else "info"
+        if not get_config().alert_level_enabled(level):
+            logger.info(f"盯价提醒被 ALERT_LEVELS 过滤 {alert['code']} level={level}")
+            continue
         title = "触发加仓价，但卖压偏重" if heavy_pressure else "触发加仓价"
         template = "orange" if heavy_pressure else "green"
         action_line = "建议先别急着加，已挂买单可考虑撤单观察。" if heavy_pressure else "卖压未明显放大，可按计划关注加仓。"
@@ -191,6 +271,11 @@ def _monitor_major_news(storage: Storage, market: MarketData, feishu: FeishuClie
 
             direction = "正面" if score > 0.08 else "负面" if score < -0.08 else "中性"
             template = "red" if score < -0.08 else "green" if score > 0.08 else "blue"
+            level = "critical" if score < -0.08 else "info"
+            if not cfg.alert_level_enabled(level):
+                storage.mark_alert_event(key, "news_filtered", code, title)
+                logger.info(f"重大新闻提醒被 ALERT_LEVELS 过滤 {code} level={level}")
+                continue
             card = render_text_card("个股重大消息提醒", [
                 f"**{name}**({code}) {direction}消息 {score:+.2f}",
                 f"来源：{item.get('source', '未知')}",
@@ -469,7 +554,9 @@ def once():
 
     # 5. 最终决策
     engine = DecisionEngine(storage)
+    all_alert_results = []
     run_results = []
+    final_decisions = []
 
     for d in decisions:
         decision = engine.decide_one(
@@ -492,7 +579,17 @@ def once():
             decision["_will_push"] = True
             storage.mark_position_notified(tracked_by_code[d["code"]]["id"])
         if decision.get("_will_push"):
-            run_results.append(decision)
+            level = _decision_alert_level(decision)
+            decision["_alert_level"] = level
+            all_alert_results.append(decision)
+            if cfg.alert_level_enabled(level):
+                run_results.append(decision)
+            else:
+                logger.info(
+                    f"决策提醒被 ALERT_LEVELS 过滤 {decision['code']} "
+                    f"level={level}({ALERT_LEVEL_LABELS.get(level, level)})"
+                )
+        final_decisions.append(decision)
         storage.insert_decision(run_id, datetime.now().isoformat(), decision)
         llm_calls += 1
 
@@ -511,6 +608,14 @@ def once():
                     break
         else:
             push_status = "无可展示信号"
+    if not all_alert_results:
+        summary_ok = _send_after_close_summary(
+            storage, feishu, final_decisions, run_results,
+            tracked_positions, price_alerts,
+        )
+        if summary_ok:
+            push_ok = True
+            push_status = "安心总结成功"
 
     # 7. 记录统计
     tokens_used = get_token_usage()
