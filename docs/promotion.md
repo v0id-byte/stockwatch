@@ -104,7 +104,7 @@ A personal A-share watchlist and alert bot for family use. It monitors prices, a
 - SQLite 本地存储
 - AKShare + 腾讯财经公开行情接口
 - 巨潮资讯/东方财富公告新闻等公开数据源
-- MiniMax/OpenAI-compatible LLM 接口
+- OpenAI-compatible / Anthropic / 本地模型 LLM 接口
 - 飞书/Lark 自建应用机器人
 - 可选 Alpha158 风格因子和 LightGBM 排序模型
 - systemd 或 Docker Compose 部署
@@ -121,6 +121,7 @@ A personal A-share watchlist and alert bot for family use. It monitors prices, a
 - 基于历史决策和 K 线的信号复盘报告
 - 安心模式：无重大风险时，收盘后发“今天不用盯盘”的总结
 - 提醒等级过滤：用户可以只看 critical/warning，过滤普通 info
+- 模型提供商可自定义：云端模型看质量，本地模型省成本
 
 项目边界：
 

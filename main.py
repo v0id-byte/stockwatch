@@ -297,7 +297,7 @@ def monitor_once(check_news: bool = False):
 
 
 def demo(query: str = ""):
-    """无需飞书推送的终端体验入口；MiniMax 配好时输出完整问答，否则降级为规则快照。"""
+    """无需飞书推送的终端体验入口；LLM 配好时输出完整问答，否则降级为规则快照。"""
     os.environ.setdefault("STOCKWATCH_SKIP_REQUIRED_CONFIG", "1")
     cfg = get_config()
     storage = Storage()
@@ -347,7 +347,7 @@ def demo(query: str = ""):
 
 
 def test():
-    """测试 AKShare / MiniMax / 飞书 连接"""
+    """测试 AKShare / LLM / 飞书 连接"""
     print("=" * 40)
     print("StockWatch 自检")
     print("=" * 40)
@@ -361,13 +361,14 @@ def test():
     except Exception as e:
         print(f"❌ AKShare 失败: {e}")
 
-    # 2. MiniMax
+    # 2. LLM
     try:
+        cfg = get_config()
         llm = get_llm_client()
         result = llm.chat([{"role": "user", "content": "Hello, reply OK"}])
-        print(f"✅ MiniMax 连接成功")
+        print(f"✅ LLM 连接成功 → {cfg.llm_provider}/{cfg.llm_model}")
     except Exception as e:
-        print(f"❌ MiniMax 失败: {e}")
+        print(f"❌ LLM 失败: {e}")
 
     # 3. 飞书
     try:

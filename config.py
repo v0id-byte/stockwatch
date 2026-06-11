@@ -39,27 +39,79 @@ class Config:
         if _env_bool("STOCKWATCH_SKIP_REQUIRED_CONFIG", False):
             return
         required = [
-            "MINIMAX_API_KEY",
             "FEISHU_APP_ID",
             "FEISHU_APP_SECRET",
             "FEISHU_RECEIVE_ID",
         ]
+        if not self.llm_api_key and not self.llm_allows_empty_key:
+            required.append("LLM_API_KEY")
         missing = [k for k in required if not os.getenv(k)]
         if missing:
             raise ValueError(f"缺少必填配置项: {', '.join(missing)}")
 
     # === LLM ===
     @property
+    def llm_provider(self) -> str:
+        raw = os.getenv("LLM_PROVIDER", "").strip().lower()
+        if raw:
+            return raw
+        if os.getenv("ANTHROPIC_API_KEY"):
+            return "anthropic"
+        return "openai"
+
+    @property
+    def llm_api_key(self) -> str:
+        if self.llm_provider == "anthropic":
+            return os.getenv("LLM_API_KEY") or os.getenv("ANTHROPIC_API_KEY", "")
+        return os.getenv("LLM_API_KEY") or os.getenv("MINIMAX_API_KEY", "")
+
+    @property
+    def llm_base_url(self) -> str:
+        if self.llm_provider == "anthropic":
+            raw = (
+                os.getenv("LLM_BASE_URL")
+                or os.getenv("ANTHROPIC_BASE_URL")
+                or "https://api.anthropic.com"
+            )
+        else:
+            raw = (
+                os.getenv("LLM_BASE_URL")
+                or os.getenv("MINIMAX_BASE_URL")
+                or "https://api.minimaxi.com/v1"
+            )
+        return raw.rstrip("/")
+
+    @property
+    def llm_model(self) -> str:
+        if self.llm_provider == "anthropic":
+            return (
+                os.getenv("LLM_MODEL")
+                or os.getenv("ANTHROPIC_MODEL")
+                or "claude-3-5-sonnet-latest"
+            )
+        return os.getenv("LLM_MODEL") or os.getenv("MINIMAX_MODEL", "MiniMax-M2.7")
+
+    @property
+    def llm_allows_empty_key(self) -> bool:
+        host = self.llm_base_url.lower()
+        local_hosts = ("http://localhost", "http://127.0.0.1", "http://0.0.0.0")
+        return self.llm_provider == "openai" and host.startswith(local_hosts)
+
+    @property
+    def llm_api_key_or_placeholder(self) -> str:
+        return self.llm_api_key or "not-needed"
+
+    @property
     def minimax_api_key(self) -> str:
-        return os.getenv("MINIMAX_API_KEY", "")
+        return self.llm_api_key
 
     @property
     def minimax_base_url(self) -> str:
-        return os.getenv("MINIMAX_BASE_URL", "https://api.minimaxi.com/v1").rstrip("/")
+        return self.llm_base_url
 
     @property
     def minimax_model(self) -> str:
-        return os.getenv("MINIMAX_MODEL", "MiniMax-M2.7")
+        return self.llm_model
 
     # === 飞书 ===
     @property
