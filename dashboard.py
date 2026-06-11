@@ -24,6 +24,7 @@ CUSTOM_FACTORS_DIR = Path.home() / ".stockwatch" / "custom_factors"
 _ENV_ASSIGN_RE = re.compile(r"^(\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*=\s*)(.*?)(\r?\n)?$")
 WEB_USER_ID = "web-ui"
 WEB_CHAT_ID = "web-ui"
+FEEDBACK_URL = "https://github.com/v0id-byte/stockwatch/issues"
 
 DEFAULT_SETTINGS = {
     "NOTIFY_CHANNEL": "feishu",
@@ -653,6 +654,7 @@ def _nav(active: str) -> str:
         cls = "active" if key == active else ""
         current = " aria-current='page'" if key == active else ""
         links.append(f"<a class='{cls}' href='{href}'{current}>{_e(label)}</a>")
+    links.append(f"<a href='{FEEDBACK_URL}' target='_blank' rel='noopener noreferrer'>反馈</a>")
     return "".join(links)
 
 
@@ -700,7 +702,11 @@ def _onboarding_panel(data: dict, settings: dict[str, str]) -> str:
 
 
 def _compliance_notice() -> str:
-    return """
+    return f"""
+    <section class="feedback">
+      <h2>反馈入口</h2>
+      <p>遇到数据异常、提醒误报、配置卡住或想提新功能，可以到 <a href="{FEEDBACK_URL}" target="_blank" rel="noopener noreferrer">GitHub Issues</a> 留下问题。</p>
+    </section>
     <section class="compliance">
       <h2>合规边界</h2>
       <p>StockWatch 是自选股盯盘提醒、公开信息聚合和持仓风险复核工具，不是证券投资咨询服务，也不是荐股软件。</p>
@@ -850,17 +856,27 @@ def _layout(active: str, title: str, subtitle: str, content: str,
       background: #eef8f2;
       color: var(--green);
     }}
-    .compliance {{
+    .feedback, .compliance {{
       max-width: 1080px;
       margin-top: 28px;
       padding: 14px 16px;
-      border: 1px solid #f0d2a5;
       border-radius: 8px;
+    }}
+    .feedback {{
+      border: 1px solid var(--line);
+      background: var(--panel);
+      color: var(--text);
+    }}
+    .feedback h2, .compliance h2 {{ margin-bottom: 6px; font-size: 15px; }}
+    .feedback p, .compliance p {{ margin: 5px 0 0; font-size: 12px; }}
+    .feedback p {{ color: var(--muted); }}
+    .feedback a {{ color: var(--blue); font-weight: 650; }}
+    .compliance {{
+      border: 1px solid #f0d2a5;
       background: #fffaf2;
       color: #4b3a23;
     }}
-    .compliance h2 {{ margin-bottom: 6px; font-size: 15px; }}
-    .compliance p {{ margin: 5px 0 0; color: #6a5430; font-size: 12px; }}
+    .compliance p {{ color: #6a5430; }}
     .form-grid {{ display: grid; grid-template-columns: repeat(2, minmax(220px, 1fr)); gap: 14px; }}
     .field {{ display: grid; gap: 7px; }}
     .field.wide {{ grid-column: 1 / -1; }}

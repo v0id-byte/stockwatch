@@ -237,6 +237,7 @@ python main.py dashboard
 
 Web 控制台直接读取本地 SQLite，并提供本地配置入口，可用于：
 
+- 首页“开始使用”初始引导：添加自选股、配置模型、选择通知方式、设置打扰级别、添加持仓或关键价
 - 最近运行记录
 - AI 控制台里直接提问、查股票、开始/停止持仓跟踪、设置/取消盯价；回答区会提取关键摘要和可一键执行的盯盘动作
 - 最近信号和置信度
@@ -245,8 +246,11 @@ Web 控制台直接读取本地 SQLite，并提供本地配置入口，可用于
 - 5 日信号复盘摘要
 - 自选股、模型接口/API Key、通知渠道、功能开关、AI 回复风格和因子开关配置
 - 上传自定义因子文件，保存为本地贡献包，便于后续提交社区
+- 反馈入口：Web UI 导航和页面底部会链接到 [GitHub Issues](https://github.com/v0id-byte/stockwatch/issues)
 
 保存配置会写入本地 `.env`；已运行的守护进程或飞书 Bot 通常需要重启后读取新配置。
+
+第一次打开 Web 控制台时，建议按首页“开始使用”清单依次完成：先添加自选股，再配置模型和通知方式，然后设置提醒级别，最后添加真实持仓或关键价。这样系统会围绕你真正关心的股票提醒，而不是泛泛扫描。
 
 如果只想使用 Web 控制台，不接飞书，可以设置：
 
@@ -663,12 +667,16 @@ Default URL: `http://127.0.0.1:8765`.
 
 The web console reads the local SQLite database and provides:
 
+- A first-run "Get started" guide on the home page: add watchlist symbols, configure the model, choose a notification channel, set alert levels, and add tracked positions or key-price alerts
 - Direct AI chat for market questions, stock research, position tracking and buy-price alerts, with key summaries and one-click watch actions in the answer area
 - Recent runs, recent signals, active tracked positions, active price alerts and signal review
 - Settings pages for the watchlist, model endpoint/API key, notification channel, feature toggles, AI response style and factor switches
 - Custom factor uploads saved as local contribution packages for future community sharing
+- A feedback entry in the web navigation and page footer linking to [GitHub Issues](https://github.com/v0id-byte/stockwatch/issues)
 
 Saved settings are written to the local `.env`; already-running daemon or bot processes usually need a restart before they read the new values.
+
+On first launch, follow the home-page "Get started" checklist in order: add watchlist symbols, configure the model and notification channel, choose alert levels, then add real positions or key prices. This keeps alerts focused on the stocks you actually care about instead of broad scanning.
 
 For a Web-only setup without Feishu/Lark credentials:
 
