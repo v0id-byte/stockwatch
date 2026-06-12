@@ -1,4 +1,12 @@
-"""LightGBM ranker inference wrapper."""
+"""LightGBM ranker inference wrapper.
+
+References:
+    LightGBM: A Highly Efficient Gradient Boosting Decision Tree
+        Ke et al. (2017, NeurIPS) — https://papers.nips.cc/paper/6907-lightgbm
+    Learning to Rank with LambdaMART / LambdaRank
+        Burges (2010) — https://www.microsoft.com/en-us/research/publication/from-ranknet-to-lambdarank-to-lambdamart-an-overview/
+    Cross-sectional stock ranking framing follows Qlib LightGBM examples.
+"""
 from __future__ import annotations
 
 import json

@@ -1,5 +1,6 @@
-"""市场数据获取（腾讯财经接口）"""
-import re, json
+"""市场数据获取（腾讯财经主源，AKShare 备用源）"""
+import re
+import json
 import requests
 from loguru import logger
 
@@ -26,7 +27,14 @@ class MarketData:
     def get_realtime_quote(codes: list[str]) -> dict[str, dict]:
         if not codes:
             return {}
-        # 腾讯接口：sh + 6位数代码（ETF/股票均用 sh/sz 前缀）
+        result = MarketData._get_realtime_quote_tencent(codes)
+        if not result:
+            logger.warning("腾讯行情接口无响应，切换 AKShare 备用源")
+            result = MarketData._get_realtime_quote_akshare(codes)
+        return result
+
+    @staticmethod
+    def _get_realtime_quote_tencent(codes: list[str]) -> dict[str, dict]:
         code_str = ','.join([
             f"sh{c}" if c.startswith(('6', '5')) else f"sz{c}"
             for c in codes
@@ -41,10 +49,10 @@ class MarketData:
                 m = re.search(r'v_(\w+)="([^"]+)"', line)
                 if not m:
                     continue
-                raw_code = m.group(1)  # e.g. v_sh600519
+                raw_code = m.group(1)
                 if len(raw_code) < 4:
                     continue
-                code = raw_code[2:]  # strip sh/sz
+                code = raw_code[2:]  # strip sh/sz prefix
                 fields = m.group(2).split('~')
                 if len(fields) < 40:
                     continue
@@ -69,12 +77,54 @@ class MarketData:
                     continue
             return result
         except Exception as e:
-            logger.warning(f"实时报价失败: {e}")
+            logger.warning(f"腾讯实时报价失败: {e}")
+            return {}
+
+    @staticmethod
+    def _get_realtime_quote_akshare(codes: list[str]) -> dict[str, dict]:
+        """AKShare 备用实时报价（缺少五档盘口数据，已标注）。"""
+        try:
+            import akshare as ak
+            df = ak.stock_zh_a_spot_em()
+            df["代码"] = df["代码"].astype(str).str.zfill(6)
+            target = set(codes)
+            result = {}
+            for _, row in df.iterrows():
+                code = str(row.get("代码", "")).zfill(6)
+                if code not in target:
+                    continue
+                result[code] = {
+                    "name": str(row.get("名称", "")),
+                    "open": _to_float(row.get("今开")),
+                    "high": _to_float(row.get("最高")),
+                    "low": _to_float(row.get("最低")),
+                    "close": _to_float(row.get("最新价")),
+                    "volume": _to_float(row.get("成交量")),
+                    "pct_change": _to_float(row.get("涨跌幅")),
+                    "quote_time": "",
+                    # 五档盘口 AKShare 不提供，填 0 以保持字段兼容
+                    "outer_volume": 0,
+                    "inner_volume": 0,
+                    "buy_volume_5": 0,
+                    "sell_volume_5": 0,
+                }
+            logger.info(f"AKShare 备用报价返回 {len(result)} 只")
+            return result
+        except Exception as e:
+            logger.warning(f"AKShare 实时报价备用源失败: {e}")
             return {}
 
     @staticmethod
     def get_daily_kline(code: str, period: str = "daily", adjust: str = "qfq", limit: int = 320) -> list[dict]:
-        """腾讯财经日线前复权"""
+        """日线 K 线（腾讯主源，AKShare 备用）。"""
+        result = MarketData._get_daily_kline_tencent(code, limit)
+        if not result:
+            logger.warning(f"腾讯K线无响应 {code}，切换 AKShare 备用源")
+            result = MarketData._get_daily_kline_akshare(code, limit)
+        return result
+
+    @staticmethod
+    def _get_daily_kline_tencent(code: str, limit: int = 320) -> list[dict]:
         try:
             prefix = "sh" if code.startswith(('6', '5')) else "sz"
             url = (f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
@@ -107,7 +157,41 @@ class MarketData:
                     continue
             return records
         except Exception as e:
-            logger.warning(f"K线获取失败 {code}: {e}")
+            logger.warning(f"腾讯K线获取失败 {code}: {e}")
+            return []
+
+    @staticmethod
+    def _get_daily_kline_akshare(code: str, limit: int = 320) -> list[dict]:
+        """AKShare 备用 K 线（前复权）。"""
+        try:
+            import akshare as ak
+            from datetime import date, timedelta
+            end = date.today().isoformat().replace("-", "")
+            start = (date.today() - timedelta(days=limit * 2)).isoformat().replace("-", "")
+            df = ak.stock_zh_a_hist(
+                symbol=code, period="daily", adjust="qfq",
+                start_date=start, end_date=end
+            )
+            if df is None or len(df) == 0:
+                return []
+            records = []
+            for _, row in df.tail(limit).iterrows():
+                try:
+                    records.append({
+                        "trade_date": str(row["日期"])[:10],
+                        "open": float(row.get("开盘") or 0),
+                        "close": float(row.get("收盘") or 0),
+                        "high": float(row.get("最高") or 0),
+                        "low": float(row.get("最低") or 0),
+                        "volume": float(row.get("成交量") or 0),
+                        "amount": float(row.get("成交额") or 0),
+                    })
+                except (ValueError, KeyError):
+                    continue
+            logger.info(f"AKShare 备用K线返回 {len(records)} 条 {code}")
+            return records
+        except Exception as e:
+            logger.warning(f"AKShare K线备用源失败 {code}: {e}")
             return []
 
     @staticmethod

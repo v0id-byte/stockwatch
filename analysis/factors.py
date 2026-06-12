@@ -1,4 +1,12 @@
-"""Alpha158 factor calculation implemented with pandas."""
+"""Alpha158 factor calculation implemented with pandas.
+
+References:
+    Qlib: A AI-oriented Quantitative Investment Platform
+        Liu et al. (2021) — https://arxiv.org/abs/2009.11189
+    101 Formulaic Alphas (WorldQuant style)
+        Kakushadze (2016) — https://arxiv.org/abs/1601.00991
+    This implementation follows Qlib's Alpha158/Alpha360 feature definitions.
+"""
 from __future__ import annotations
 
 import warnings

@@ -1,4 +1,15 @@
-"""技术指标分析（纯 pandas，不调 LLM）"""
+"""技术指标分析（纯 pandas，不调 LLM）
+
+References:
+    RSI (Relative Strength Index):
+        Wilder, J.W. (1978). New Concepts in Technical Trading Systems.
+    MACD (Moving Average Convergence/Divergence):
+        Appel, G. (1979). The Moving Average Convergence-Divergence Method.
+    KDJ (Stochastic Oscillator, Chinese variant of Lane's %K/%D):
+        Lane, G. (1984). Lane's Stochastics. Technical Analysis of Stocks & Commodities.
+    ATR (Average True Range):
+        Wilder, J.W. (1978). New Concepts in Technical Trading Systems.
+"""
 import numpy as np
 import pandas as pd
 from loguru import logger
