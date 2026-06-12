@@ -144,6 +144,7 @@ class Storage:
             created_at TEXT NOT NULL
         );
         """)
+        self._add_column(conn, "price_alerts", "direction", "direction TEXT NOT NULL DEFAULT 'below'")
 
     @staticmethod
     def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
@@ -441,9 +442,9 @@ class Storage:
         with self._conn() as conn:
             existing = conn.execute("""
                 SELECT id FROM price_alerts
-                WHERE user_id=? AND code=? AND status='active'
+                WHERE user_id=? AND code=? AND direction=? AND status='active'
                 ORDER BY created_at DESC LIMIT 1
-            """, [payload["user_id"], payload["code"]]).fetchone()
+            """, [payload["user_id"], payload["code"], payload["direction"]]).fetchone()
             if existing:
                 conn.execute("""
                     UPDATE price_alerts

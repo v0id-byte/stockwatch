@@ -68,25 +68,33 @@ class BotService:
         return render_text_card("未找到跟踪", [f"`{code}` 没有正在跟踪的持仓。"], template="orange")
 
     def open_price_alert(self, user_id: str, chat_id: str, code: str,
-                         trigger_price: float, quantity: float | None = None) -> dict:
+                         trigger_price: float, quantity: float | None = None,
+                         direction: str = "below") -> dict:
         quotes = self.market.get_realtime_quote([code])
         quote = quotes.get(code, {})
         name = quote.get("name", code)
+        direction = "above" if direction == "above" else "below"
+        verb = "涨到" if direction == "above" else "跌到"
+        note = "涨到观察压力位提醒复核" if direction == "above" else "跌到关键价提醒观察"
         self.storage.upsert_price_alert({
             "user_id": user_id,
             "chat_id": chat_id,
             "code": code,
             "name": name,
             "trigger_price": trigger_price,
+            "direction": direction,
             "quantity": quantity,
-            "note": "跌到关键价提醒观察",
+            "note": note,
         })
-        lines = [f"已盯 `{name}({code})`：跌到 {trigger_price:.2f} 元提醒观察。"]
+        lines = [f"已盯 `{name}({code})`：{verb} {trigger_price:.2f} 元提醒复核。"]
         if quantity:
             lines.append(f"计划数量：{quantity:g}股")
         if quote:
             lines.append(f"当前价：{quote.get('close', 0):.2f}元，今日涨跌：{quote.get('pct_change', 0):+.2f}%")
-        lines.append("触价时会顺带看盘口卖压，卖压重会提示先复核风险。")
+        if direction == "above":
+            lines.append("触价时只提示你复核压力位，不代表卖出指令。")
+        else:
+            lines.append("触价时会顺带看盘口卖压，卖压重会提示先复核风险。")
         return render_text_card("关键价提醒已设置", lines, template="green")
 
     def cancel_price_alert(self, user_id: str, code: str) -> dict:

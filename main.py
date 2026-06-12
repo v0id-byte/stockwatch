@@ -200,23 +200,40 @@ def _monitor_price_alerts(storage: Storage, market: MarketData, feishu: FeishuCl
         quote = quotes.get(alert["code"], {})
         current_price = float(quote.get("close") or 0)
         trigger_price = float(alert.get("trigger_price") or 0)
-        if current_price <= 0 or trigger_price <= 0 or current_price > trigger_price:
+        direction = alert.get("direction") or "below"
+        if current_price <= 0 or trigger_price <= 0:
             continue
-
-        heavy_pressure, pressure_text = _sell_pressure(quote)
-        level = "warning" if heavy_pressure else "info"
-        if not get_config().alert_level_enabled(level):
-            logger.info(f"盯价提醒被 ALERT_LEVELS 过滤 {alert['code']} level={level}")
-            continue
-        title = "触发加仓价，但卖压偏重" if heavy_pressure else "触发加仓价"
-        template = "orange" if heavy_pressure else "green"
-        action_line = "建议先别急着加，已挂买单可考虑撤单观察。" if heavy_pressure else "卖压未明显放大，可按计划关注加仓。"
-        lines = [
-            f"**{alert.get('name', alert['code'])}**({alert['code']}) 跌到 {current_price:.2f}元",
-            f"盯价：{trigger_price:.2f}元",
-            f"盘口：{pressure_text}",
-            f"建议：{action_line}",
-        ]
+        if direction == "above":
+            if current_price < trigger_price:
+                continue
+            level = "warning"
+            if not get_config().alert_level_enabled(level):
+                logger.info(f"压力位提醒被 ALERT_LEVELS 过滤 {alert['code']} level={level}")
+                continue
+            title = "触达观察压力位"
+            template = "orange"
+            lines = [
+                f"**{alert.get('name', alert['code'])}**({alert['code']}) 涨到 {current_price:.2f}元",
+                f"观察压力位：{trigger_price:.2f}元",
+                "提醒：已到你设置的压力观察位，请复核计划；这不是卖出指令。",
+            ]
+        else:
+            if current_price > trigger_price:
+                continue
+            heavy_pressure, pressure_text = _sell_pressure(quote)
+            level = "warning" if heavy_pressure else "info"
+            if not get_config().alert_level_enabled(level):
+                logger.info(f"风险价提醒被 ALERT_LEVELS 过滤 {alert['code']} level={level}")
+                continue
+            title = "触达风险价，卖压偏重" if heavy_pressure else "触达风险价"
+            template = "orange" if heavy_pressure else "green"
+            action_line = "卖压偏重，建议先复核仓位和风险计划。" if heavy_pressure else "卖压未明显放大，请按自己的计划复核。"
+            lines = [
+                f"**{alert.get('name', alert['code'])}**({alert['code']}) 跌到 {current_price:.2f}元",
+                f"风险价/关键价：{trigger_price:.2f}元",
+                f"盘口：{pressure_text}",
+                f"提醒：{action_line}",
+            ]
         if alert.get("quantity"):
             lines.insert(2, f"计划数量：{float(alert['quantity']):g}股")
         card = render_text_card(title, lines, template=template)
@@ -287,7 +304,7 @@ def _monitor_major_news(storage: Storage, market: MarketData, feishu: FeishuClie
 
 
 def monitor_once(check_news: bool = False):
-    """盘中轻量监控：盯加仓价 + 可选重大新闻扫描。"""
+    """盘中轻量监控：盯关键价 + 可选重大新闻扫描。"""
     cfg = get_config()
     if cfg.notify_channel != "feishu":
         logger.info("NOTIFY_CHANNEL=web，盘中轻量监控仅在 Web 控制台查看，跳过飞书推送")

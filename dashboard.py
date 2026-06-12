@@ -428,6 +428,172 @@ def _market_snapshot_result(service) -> dict:
     return {"title": "行情快照", "text": text, "ok": True, "summary": summary, "actions": []}
 
 
+def _positive_float(value: str, label: str, required: bool = True) -> float | None:
+    value = (value or "").strip().replace(",", "")
+    if not value:
+        if required:
+            raise ValueError(f"请输入{label}")
+        return None
+    try:
+        number = float(value)
+    except ValueError as exc:
+        raise ValueError(f"{label}需要是数字") from exc
+    if number <= 0:
+        raise ValueError(f"{label}需要大于 0")
+    return number
+
+
+def _stock_code(value: str) -> str:
+    match = re.search(r"(?<!\d)(\d{6})(?!\d)", value or "")
+    if not match:
+        raise ValueError("请输入 6 位股票代码")
+    return match.group(1)
+
+
+def _row_float(row: dict, key: str) -> float:
+    try:
+        return float(row.get(key) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _average_true_range(kline: list[dict], limit: int = 14) -> float:
+    rows = kline[-(limit + 1):]
+    if len(rows) < 2:
+        return 0.0
+    prev_close = _row_float(rows[0], "close")
+    values = []
+    for row in rows[1:]:
+        high = _row_float(row, "high")
+        low = _row_float(row, "low")
+        close = _row_float(row, "close")
+        if high <= 0 or low <= 0 or prev_close <= 0:
+            prev_close = close
+            continue
+        values.append(max(high - low, abs(high - prev_close), abs(low - prev_close)))
+        prev_close = close
+    return sum(values[-limit:]) / len(values[-limit:]) if values else 0.0
+
+
+def _recent_support_resistance(kline: list[dict], current_price: float) -> tuple[float, float]:
+    recent = kline[-20:]
+    lows = sorted({_row_float(row, "low") for row in recent if _row_float(row, "low") > 0})
+    highs = sorted({_row_float(row, "high") for row in recent if _row_float(row, "high") > 0})
+    support = max([price for price in lows if price <= current_price], default=(min(lows) if lows else 0.0))
+    resistance = min([price for price in highs if price >= current_price], default=(max(highs) if highs else 0.0))
+    return support, resistance
+
+
+def _dedupe_candidates(items: list[tuple[str, float]], current_price: float, side: str) -> list[tuple[str, float]]:
+    result = []
+    seen = set()
+    for label, price in items:
+        if price <= 0:
+            continue
+        if side == "below" and price >= current_price:
+            continue
+        if side == "above" and price <= current_price:
+            continue
+        rounded = round(price, 2)
+        if rounded in seen:
+            continue
+        seen.add(rounded)
+        result.append((label, rounded))
+    return result
+
+
+def _format_candidates(items: list[tuple[str, float]]) -> str:
+    if not items:
+        return "暂无可用候选位"
+    return "\n".join(f"- {label}: {price:.2f} 元" for label, price in items)
+
+
+def _risk_plan_result(params: dict[str, list[str]], storage: Storage) -> dict:
+    from data.market import MarketData
+
+    code = _stock_code(_first(params, "code"))
+    cost_price = _positive_float(_first(params, "cost_price"), "成本价")
+    quantity = _positive_float(_first(params, "quantity"), "数量", required=False)
+
+    market = MarketData()
+    quote = market.get_realtime_quote([code]).get(code, {})
+    name = quote.get("name") or code
+
+    try:
+        if not storage.kline_cached_today(code):
+            for row in market.get_daily_kline(code, limit=120):
+                storage.upsert_kline(code, row["trade_date"], row)
+    except Exception:
+        pass
+    kline = storage.get_kline(code, "2020-01-01", datetime.now().strftime("%Y-%m-%d"))[-60:]
+
+    current_price = _row_float(quote, "close")
+    if current_price <= 0 and kline:
+        current_price = _row_float(kline[-1], "close")
+    if current_price <= 0:
+        current_price = cost_price
+
+    atr = _average_true_range(kline)
+    support, resistance = _recent_support_resistance(kline, current_price)
+
+    risk_items = [
+        ("成本下方 7%", cost_price * 0.93),
+        ("成本下方 10%", cost_price * 0.90),
+        ("现价下方 3%", current_price * 0.97),
+        ("近 20 日支撑下方 1%", support * 0.99),
+        ("2 倍 ATR 风险线", current_price - 2 * atr if atr > 0 else 0),
+    ]
+    pressure_items = [
+        ("成本上方 10%", cost_price * 1.10),
+        ("固定 2R 观察位", cost_price + 2 * (cost_price - cost_price * 0.93)),
+        ("近 20 日压力位", resistance),
+        ("2 倍 ATR 观察位", current_price + 2 * atr if atr > 0 else 0),
+        ("现价上方 5%", current_price * 1.05),
+    ]
+    risk_candidates = _dedupe_candidates(risk_items, current_price, "below")
+    pressure_candidates = _dedupe_candidates(pressure_items, current_price, "above")
+    risk_price = risk_candidates[0][1] if risk_candidates else round(current_price * 0.97, 2)
+    pressure_price = pressure_candidates[0][1] if pressure_candidates else round(current_price * 1.05, 2)
+
+    data_note = "已结合实时价、近 20 日支撑压力和 ATR" if kline else "行情/K 线不足，先按成本价和现价固定比例生成"
+    text = (
+        f"{name}({code}) 参考风险线\n"
+        f"{data_note}。\n\n"
+        "候选风险价（向下触发）：\n"
+        f"{_format_candidates(risk_candidates)}\n\n"
+        "候选观察压力位（向上触发）：\n"
+        f"{_format_candidates(pressure_candidates)}\n\n"
+        "这是参考风控线和观察压力位，不是买卖指令；请自行确认后再保存提醒。"
+    )
+    actions = [
+        {
+            "label": "保存风险价提醒",
+            "params": {"console_action": "price_alert", "code": code, "price": risk_price, "direction": "below", "quantity": quantity or ""},
+        },
+        {
+            "label": "保存压力位提醒",
+            "params": {"console_action": "price_alert", "code": code, "price": pressure_price, "direction": "above", "quantity": quantity or ""},
+        },
+        {
+            "label": "按成本价跟踪",
+            "params": {"console_action": "track_position", "code": code, "price": cost_price, "quantity": quantity or ""},
+        },
+    ]
+    return {
+        "title": "参考风险线",
+        "text": text,
+        "ok": True,
+        "summary": [
+            {"label": "标的", "value": f"{name} {code}"},
+            {"label": "成本价", "value": f"{cost_price:.2f}"},
+            {"label": "现价", "value": f"{current_price:.2f}"},
+            {"label": "风险价", "value": f"{risk_price:.2f}"},
+            {"label": "压力位", "value": f"{pressure_price:.2f}"},
+        ],
+        "actions": actions,
+    }
+
+
 def _extract_price(text: str, patterns: list[str]) -> str:
     for pattern in patterns:
         match = re.search(pattern, text)
@@ -482,7 +648,7 @@ def _console_summary_and_actions(title: str, text: str) -> tuple[list[dict], lis
     if code and alert_price:
         actions.append({
             "label": "跌到关键价提醒",
-            "params": {"console_action": "price_alert", "code": code, "price": alert_price},
+            "params": {"console_action": "price_alert", "code": code, "price": alert_price, "direction": "below"},
         })
     if code:
         actions.append({
@@ -529,28 +695,38 @@ def _run_web_command(text: str, storage: Storage) -> dict:
 
 
 def _run_web_action(params: dict[str, list[str]], storage: Storage) -> dict:
-    action = _first(params, "console_action")
-    if action == "track_position":
-        command = " ".join(filter(None, [
-            "买入",
-            _first(params, "code"),
-            _first(params, "price"),
-            _first(params, "quantity"),
-        ]))
-        return _run_web_command(command, storage)
-    if action == "price_alert":
-        command = " ".join(filter(None, [
-            "盯买",
-            _first(params, "code"),
-            _first(params, "price"),
-            _first(params, "quantity"),
-        ]))
-        return _run_web_command(command, storage)
-    if action == "close_position":
-        return _run_web_command(f"停止跟踪 {_first(params, 'code')}", storage)
-    if action == "cancel_price_alert":
-        return _run_web_command(f"取消盯价 {_first(params, 'code')}", storage)
-    return _run_web_command(_first(params, "question"), storage)
+    try:
+        action = _first(params, "console_action")
+        if action == "risk_plan":
+            return _risk_plan_result(params, storage)
+        if action == "track_position":
+            command = " ".join(filter(None, [
+                "买入",
+                _first(params, "code"),
+                _first(params, "price"),
+                _first(params, "quantity"),
+            ]))
+            return _run_web_command(command, storage)
+        if action == "price_alert":
+            from bot.service import BotService
+
+            direction = _first(params, "direction", "below")
+            if direction not in {"below", "above"}:
+                direction = "below"
+            code = _stock_code(_first(params, "code"))
+            price = _positive_float(_first(params, "price"), "关键价")
+            quantity = _positive_float(_first(params, "quantity"), "数量", required=False)
+            service = BotService(storage)
+            return _card_to_result(service.open_price_alert(
+                WEB_USER_ID, WEB_CHAT_ID, code, price, quantity, direction=direction,
+            ))
+        if action == "close_position":
+            return _run_web_command(f"停止跟踪 {_first(params, 'code')}", storage)
+        if action == "cancel_price_alert":
+            return _run_web_command(f"取消盯价 {_first(params, 'code')}", storage)
+        return _run_web_command(_first(params, "question"), storage)
+    except Exception as exc:
+        return _error_result(str(exc))
 
 
 def load_dashboard_data(storage: Storage) -> dict:
@@ -727,13 +903,17 @@ def _positions_table(rows: list[dict]) -> str:
     return _table("持仓跟踪", ["代码", "名称", "成本价", "数量", "风险价", "压力位", "开始时间"], body)
 
 
+def _direction_label(direction: str) -> str:
+    return "涨到提醒" if direction == "above" else "跌到提醒"
+
+
 def _alerts_table(rows: list[dict]) -> str:
     body = "".join(
         "<tr>"
         f"<td><code>{_e(row.get('code'))}</code></td>"
         f"<td>{_e(row.get('name'))}</td>"
         f"<td>{_price(row.get('trigger_price'))}</td>"
-        f"<td>{_e(row.get('direction'))}</td>"
+        f"<td>{_e(_direction_label(row.get('direction')))}</td>"
         f"<td>{_e(row.get('quantity') or '-')}</td>"
         f"<td>{_date(row.get('created_at'))}</td>"
         "</tr>"
@@ -931,6 +1111,7 @@ def _compliance_notice() -> str:
       <h2>合规边界</h2>
       <p>StockWatch 是自选股盯盘提醒、公开信息聚合和持仓风险复核工具，不是证券投资咨询服务，也不是荐股软件。</p>
       <p>“机会观察”“风险复核”等提示只表示值得进一步查看，不构成买入、卖出或收益承诺；请自行核验交易所公告、上市公司披露和券商行情。</p>
+      <p>“风险价”“观察压力位”只是用户确认后的提醒线，不代表止盈止损建议或自动交易指令。</p>
     </section>
     """
 
@@ -1483,6 +1664,16 @@ def render_console(storage: Storage, settings: dict[str, str], result: dict | No
       <section class="panel">
         <h2>盯盘控制</h2>
         <form method="post" action="/console" class="options" data-console-form>
+          <input type="hidden" name="console_action" value="risk_plan">
+          <div class="mini-grid">
+            <input name="code" placeholder="代码 600519">
+            <input name="cost_price" placeholder="成本价">
+            <input name="quantity" placeholder="数量，可选">
+          </div>
+          <button type="submit">生成参考风险线</button>
+          <div class="hint">基于成本价、近 20 日支撑压力和 ATR 生成候选提醒位，需你确认后保存。</div>
+        </form>
+        <form method="post" action="/console" class="options" data-console-form>
           <input type="hidden" name="console_action" value="track_position">
           <div class="mini-grid">
             <input name="code" placeholder="代码 600519">
@@ -1497,6 +1688,10 @@ def render_console(storage: Storage, settings: dict[str, str], result: dict | No
             <input name="code" placeholder="代码 600519">
             <input name="price" placeholder="关键价">
             <input name="quantity" placeholder="数量，可选">
+            <select name="direction">
+              <option value="below">跌到提醒</option>
+              <option value="above">涨到提醒</option>
+            </select>
           </div>
           <button type="submit">新增盯价提醒</button>
         </form>
