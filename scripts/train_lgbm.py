@@ -23,6 +23,41 @@ def _group_sizes(df):
     return df.groupby("trade_date", sort=False).size().tolist()
 
 
+def _split_by_date_with_purge(df, label_horizon: int):
+    import pandas as pd
+
+    max_date = df["trade_date"].max()
+    raw_test_start = max_date - pd.DateOffset(months=6)
+    raw_val_start = raw_test_start - pd.DateOffset(months=6)
+    dates = pd.Index(sorted(df["trade_date"].drop_duplicates()))
+    val_idx = int(dates.searchsorted(raw_val_start, side="left"))
+    test_idx = int(dates.searchsorted(raw_test_start, side="left"))
+    if val_idx >= len(dates) or test_idx >= len(dates):
+        raise RuntimeError("训练/验证/测试切分为空，请检查历史数据跨度")
+
+    purge_days = max(0, label_horizon)
+    train_end_idx = max(0, val_idx - purge_days)
+    val_end_idx = max(val_idx, test_idx - purge_days)
+    train_end = dates[train_end_idx]
+    val_start = dates[val_idx]
+    val_end = dates[val_end_idx]
+    test_start = dates[test_idx]
+
+    train = df[df["trade_date"] < train_end]
+    val = df[(df["trade_date"] >= val_start) & (df["trade_date"] < val_end)]
+    test = df[df["trade_date"] >= test_start]
+    split = {
+        "raw_val_start": str(raw_val_start.date()),
+        "raw_test_start": str(raw_test_start.date()),
+        "val_start": str(val_start.date()),
+        "test_start": str(test_start.date()),
+        "train_end_exclusive": str(train_end.date()),
+        "val_end_exclusive": str(val_end.date()),
+        "purge_trading_days": purge_days,
+    }
+    return train, val, test, split
+
+
 def _feature_names() -> tuple[str, list[str]]:
     feature_set = os.getenv("STOCKWATCH_LGBM_FEATURE_SET", "stable").strip().lower()
     if feature_set == "all":
@@ -55,18 +90,33 @@ def _mean_ndcg(df, pred, k: int) -> float | None:
     return sum(scores) / len(scores) if scores else None
 
 
-def _mean_spearman_ic(df, pred) -> float | None:
+def _spearman_ic_stats(df, pred, target_col: str) -> dict | None:
     import pandas as pd
 
-    tmp = df[["trade_date", "label_score"]].copy()
+    tmp = df[["trade_date", target_col]].copy()
     tmp["pred"] = pred
-    values = []
+    rows = []
     for _date, group in tmp.groupby("trade_date", sort=False):
-        if len(group) <= 2 or group["pred"].nunique() <= 1 or group["label_score"].nunique() <= 1:
+        if len(group) <= 2 or group["pred"].nunique() <= 1 or group[target_col].nunique() <= 1:
             continue
-        values.append(group["pred"].corr(group["label_score"], method="spearman"))
-    values = pd.Series(values).dropna()
-    return float(values.mean()) if len(values) else None
+        value = group["pred"].corr(group[target_col], method="spearman")
+        if pd.notna(value):
+            rows.append({"date": str(pd.Timestamp(_date).date()), "ic": float(value)})
+    if not rows:
+        return None
+    values = pd.Series([row["ic"] for row in rows]).dropna()
+    std = values.std()
+    return {
+        "mean": float(values.mean()),
+        "std": float(std) if pd.notna(std) else None,
+        "icir": float(values.mean() / std) if pd.notna(std) and std else None,
+        "median": float(values.median()),
+        "positive_rate": float((values > 0).mean()),
+        "count": int(len(values)),
+        "worst5": sorted(rows, key=lambda row: row["ic"])[:5],
+        "best5": sorted(rows, key=lambda row: row["ic"], reverse=True)[:5],
+        "by_date": rows,
+    }
 
 
 def _mean_topk_return(df, pred, k: int, return_col: str) -> dict | None:
@@ -86,20 +136,104 @@ def _mean_topk_return(df, pred, k: int, return_col: str) -> dict | None:
     if not rows:
         return None
     result = pd.DataFrame(rows)
+    excess = result["top_return"] - result["universe_return"]
     return {
         "top_return": float(result["top_return"].mean()),
         "universe_return": float(result["universe_return"].mean()),
-        "excess_return": float((result["top_return"] - result["universe_return"]).mean()),
+        "excess_return": float(excess.mean()),
+        "excess_std": float(excess.std()),
+        "excess_positive_rate": float((excess > 0).mean()),
+        "period_count": int(len(result)),
     }
 
 
-def _evaluate_split(df, pred, return_col: str) -> dict:
+def _decile_returns(df, pred, return_col: str) -> dict | None:
+    import pandas as pd
+
+    tmp = df[["trade_date", return_col]].copy()
+    tmp["pred"] = pred
+    rows = []
+    universe = []
+    for _date, group in tmp.groupby("trade_date", sort=False):
+        if len(group) < 10 or group["pred"].nunique() <= 1:
+            continue
+        ranks = group["pred"].rank(method="first", pct=True)
+        deciles = (ranks * 10).clip(upper=9).astype(int)
+        means = group.assign(decile=deciles).groupby("decile")[return_col].mean()
+        rows.append({decile: means.get(decile) for decile in range(10)})
+        universe.append(group[return_col].mean())
+    if not rows:
+        return None
+    result = pd.DataFrame(rows)
+    universe_return = float(pd.Series(universe).mean())
+    deciles = [
+        {
+            "decile": int(decile),
+            "mean_return": float(result[decile].mean()),
+            "excess_return": float(result[decile].mean() - universe_return),
+        }
+        for decile in range(10)
+    ]
+    return {
+        "note": "decile 0 is the lowest model score; decile 9 is the highest model score",
+        "universe_return": universe_return,
+        "deciles": deciles,
+        "spread_9_minus_0": float(result[9].mean() - result[0].mean()),
+    }
+
+
+def _evaluate_split_core(df, pred, return_col: str) -> dict:
+    label_ic_stats = _spearman_ic_stats(df, pred, "label_score")
+    return_ic_stats = _spearman_ic_stats(df, pred, return_col)
     return {
         "ndcg5": _mean_ndcg(df, pred, 5),
         "ndcg10": _mean_ndcg(df, pred, 10),
-        "spearman_ic": _mean_spearman_ic(df, pred),
+        "spearman_ic": label_ic_stats["mean"] if label_ic_stats else None,
+        "spearman_ic_target": "label_score",
+        "spearman_ic_stats": label_ic_stats,
+        "return_spearman_ic": return_ic_stats["mean"] if return_ic_stats else None,
+        "return_spearman_ic_stats": return_ic_stats,
         "top5": _mean_topk_return(df, pred, 5, return_col),
         "top10": _mean_topk_return(df, pred, 10, return_col),
+        "top30": _mean_topk_return(df, pred, 30, return_col),
+        "top50": _mean_topk_return(df, pred, 50, return_col),
+        "decile_returns": _decile_returns(df, pred, return_col),
+    }
+
+
+def _non_overlapping_sample(df, pred, step: int):
+    import numpy as np
+
+    if step <= 1:
+        return df, pred
+    dates = list(df["trade_date"].drop_duplicates())
+    keep_dates = set(dates[::step])
+    mask = df["trade_date"].isin(keep_dates).to_numpy()
+    return df[mask], np.asarray(pred)[mask]
+
+
+def _evaluate_split(df, pred, return_col: str, label_horizon: int) -> dict:
+    metrics = _evaluate_split_core(df, pred, return_col)
+    sampled_df, sampled_pred = _non_overlapping_sample(df, pred, label_horizon)
+    metrics["non_overlapping"] = (
+        _evaluate_split_core(sampled_df, sampled_pred, return_col)
+        if len(sampled_df) else None
+    )
+    return metrics
+
+
+def _summary(metrics: dict) -> dict:
+    return {
+        "ndcg5": metrics["ndcg5"],
+        "ndcg10": metrics["ndcg10"],
+        "spearman_ic": metrics["spearman_ic"],
+        "return_spearman_ic": metrics["return_spearman_ic"],
+        "top5_excess": metrics["top5"]["excess_return"] if metrics["top5"] else None,
+        "top30_excess": metrics["top30"]["excess_return"] if metrics["top30"] else None,
+        "decile_spread_9_minus_0": (
+            metrics["decile_returns"]["spread_9_minus_0"]
+            if metrics["decile_returns"] else None
+        ),
     }
 
 
@@ -122,12 +256,7 @@ def main():
     if return_col not in df.columns:
         return_col = "forward_5d_return"
 
-    max_date = df["trade_date"].max()
-    test_start = max_date - pd.DateOffset(months=6)
-    val_start = test_start - pd.DateOffset(months=6)
-    train = df[df["trade_date"] < val_start]
-    val = df[(df["trade_date"] >= val_start) & (df["trade_date"] < test_start)]
-    test = df[df["trade_date"] >= test_start]
+    train, val, test, split = _split_by_date_with_purge(df, label_horizon)
     if train.empty or val.empty or test.empty:
         raise RuntimeError("训练/验证/测试切分为空，请检查历史数据跨度")
     feature_set, feature_names = _feature_names()
@@ -171,8 +300,8 @@ def main():
 
     val_pred = model.predict(val[feature_names], num_iteration=model.best_iteration)
     test_pred = model.predict(test[feature_names], num_iteration=model.best_iteration)
-    validation_metrics = _evaluate_split(val, val_pred, return_col)
-    test_metrics = _evaluate_split(test, test_pred, return_col)
+    validation_metrics = _evaluate_split(val, val_pred, return_col, label_horizon)
+    test_metrics = _evaluate_split(test, test_pred, return_col, label_horizon)
     out_dir = ROOT / "models"
     out_dir.mkdir(exist_ok=True)
     model_path = out_dir / "lgbm.txt"
@@ -198,6 +327,7 @@ def main():
         "validation_metrics": validation_metrics,
         "test_metrics": test_metrics,
         "best_iteration": model.best_iteration,
+        "split": split,
         "train_rows": len(train),
         "val_rows": len(val),
         "test_rows": len(test),
@@ -215,8 +345,8 @@ def main():
     with open(out_dir / "lgbm_meta.json", "w") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
     print(f"model saved: {model_path}")
-    print(f"validation={validation_metrics}")
-    print(f"test={test_metrics}")
+    print(f"validation={_summary(validation_metrics)}")
+    print(f"test={_summary(test_metrics)}")
 
 
 if __name__ == "__main__":

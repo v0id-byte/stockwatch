@@ -412,6 +412,8 @@ scp models/lgbm.* <user>@<host>:~/.stockwatch/models/
 ```
 
 部署端只在 `ENABLE_LGBM=true` 时加载模型；模型缺失会记录日志并跳过。
+训练脚本会按标签周期在 train/validation/test 边界做 purge，避免 20 日前瞻标签跨边界泄漏。
+`lgbm_meta.json` 里的 top-k 收益是逐交易日的前瞻收益均值，不是账户累计收益；同时会输出 IC、return-IC、十分位收益和非重叠抽样诊断。
 
 当前默认训练配置使用 `stable` 因子子集，聚焦历史验证中更稳定的流动性冲击、Beta、阶段位置、相对动量和波动类因子。如需回到全量因子训练：
 
