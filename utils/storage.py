@@ -37,6 +37,7 @@ class Storage:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 code TEXT NOT NULL, title TEXT, content TEXT,
                 source TEXT, ts TEXT, sentiment_score REAL,
+                fetched_at TEXT, available_at TEXT, sentiment_model_version TEXT,
                 UNIQUE(code, title, ts)
             );
             CREATE TABLE IF NOT EXISTS decisions (
@@ -145,6 +146,9 @@ class Storage:
         );
         """)
         self._add_column(conn, "price_alerts", "direction", "direction TEXT NOT NULL DEFAULT 'below'")
+        self._add_column(conn, "news", "fetched_at", "fetched_at TEXT")
+        self._add_column(conn, "news", "available_at", "available_at TEXT")
+        self._add_column(conn, "news", "sentiment_model_version", "sentiment_model_version TEXT")
 
     @staticmethod
     def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
@@ -186,11 +190,28 @@ class Storage:
 
     def upsert_news(self, code: str, items: list[dict]):
         if not items: return
+        now = datetime.now().isoformat(timespec="seconds")
+        rows = []
+        for item in items:
+            fetched_at = item.get("fetched_at") or now
+            rows.append({
+                "code": code,
+                "title": item.get("title"),
+                "content": item.get("content"),
+                "source": item.get("source"),
+                "ts": item.get("ts"),
+                "fetched_at": fetched_at,
+                "available_at": item.get("available_at") or fetched_at,
+                "sentiment_model_version": item.get("sentiment_model_version"),
+            })
         with self._conn() as conn:
             conn.executemany("""
-                INSERT OR IGNORE INTO news (code, title, content, source, ts, sentiment_score)
-                VALUES (:code, :title, :content, :source, :ts, NULL)
-            """, [{"code": code, **item} for item in items])
+                INSERT OR IGNORE INTO news
+                (code, title, content, source, ts, sentiment_score,
+                 fetched_at, available_at, sentiment_model_version)
+                VALUES (:code, :title, :content, :source, :ts, NULL,
+                        :fetched_at, :available_at, :sentiment_model_version)
+            """, rows)
 
     def get_news_since(self, code: str, days: int = 7) -> list[dict]:
         cutoff = (datetime.now().replace(hour=0, minute=0, second=0) - timedelta(days=days)).strftime("%Y-%m-%d")
@@ -202,11 +223,17 @@ class Storage:
             ).fetchall()
         return [dict(r) for r in rows]
 
-    def update_news_sentiment(self, code: str, title: str, ts: str, score: float):
+    def update_news_sentiment(self, code: str, title: str, ts: str, score: float,
+                              model_version: str | None = None):
         with self._conn() as conn:
             conn.execute(
-                "UPDATE news SET sentiment_score=? WHERE code=? AND title=? AND ts=?",
-                [score, code, title, ts]
+                """
+                UPDATE news
+                SET sentiment_score=?,
+                    sentiment_model_version=COALESCE(?, sentiment_model_version)
+                WHERE code=? AND title=? AND ts=?
+                """,
+                [score, model_version, code, title, ts]
             )
 
     def insert_decision(self, run_id: str, run_ts: str, dec: dict):

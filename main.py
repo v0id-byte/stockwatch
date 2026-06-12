@@ -17,7 +17,11 @@ from data.market import MarketData
 from data.news import NewsData
 from data.universe import Universe
 from analysis.technical import compute_tech_score
-from analysis.sentiment import batch_sentiment_details, score_news_items
+from analysis.sentiment import (
+    SENTIMENT_SCORE_MODEL_VERSION,
+    batch_sentiment_details,
+    score_news_items,
+)
 from decision.engine import DecisionEngine
 from push.feishu import FeishuClient, render_card, render_text_card
 
@@ -280,7 +284,10 @@ def _monitor_major_news(storage: Storage, market: MarketData, feishu: FeishuClie
         for item, score in zip(batch, scores):
             key = _news_event_key(code, item)
             title = str(item.get("title", ""))
-            storage.update_news_sentiment(code, title, item.get("ts", ""), score)
+            storage.update_news_sentiment(
+                code, title, item.get("ts", ""), score,
+                model_version=SENTIMENT_SCORE_MODEL_VERSION,
+            )
             is_major = abs(score) >= 0.8 or _major_news_by_title(title)
             if not is_major:
                 storage.mark_alert_event(key, "news_seen", code, title)
