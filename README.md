@@ -6,7 +6,7 @@
 [![LightGBM](https://img.shields.io/badge/LightGBM-ranking-00A35C)](https://github.com/microsoft/LightGBM)
 [![AKShare](https://img.shields.io/badge/Data-AKShare-blue)](https://github.com/akfamily/akshare)
 [![Feishu](https://img.shields.io/badge/Bot-Feishu%2FLark-00D6B9)](https://github.com/larksuite/oapi-sdk-python)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
 中文 | [English](#english)
 
