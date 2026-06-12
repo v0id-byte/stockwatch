@@ -426,11 +426,20 @@ STOCKWATCH_LGBM_FEATURE_SET=all python scripts/train_lgbm.py
 通用新闻情绪只能使用前向采集的数据：`news` 表会记录 `fetched_at`、`available_at` 和 `sentiment_model_version`，训练时应以 `available_at` 作为可见时间，不能用今天回补到的历史新闻重建过去信号。巨潮公告可按公告日期回补；日期型公告会保守滚到下一交易日，避免收盘前不可见的同日泄漏。
 
 ```bash
+python scripts/check_sentiment_pit.py
 python scripts/build_sentiment_features.py
 python scripts/evaluate_sentiment_features.py --features news_score_7d,ann_count_20d
 ```
 
 `build_sentiment_features.py` 会输出 `~/.stockwatch/history/sentiment_features.parquet`。新闻分数缺失保持 `NaN`，另有 `has_news_7d` 标志位；先用 `evaluate_sentiment_features.py` 单独看 IC/decile，再决定是否并入主训练集。
+全历史公告回补建议离线运行：
+
+```bash
+python scripts/build_sentiment_features.py --no-news --announcement-chunk-months 3
+python scripts/evaluate_sentiment_features.py
+```
+
+`check_sentiment_pit.py` 是合成数据断言，覆盖 15:00 cutoff、周末滚动和 available_at 后移的 shift 测试。
 
 ---
 
