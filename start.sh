@@ -58,11 +58,36 @@ if [ ! -f ".env" ]; then
     echo "    LLM_BASE_URL=https://...      ← API 地址（OpenAI 兼容接口）"
     echo "    LLM_MODEL=your-model-name     ← 模型名称"
     echo ""
-    echo "  使用本地 Ollama 免费模型（不需要 API Key）："
-    echo "    LLM_PROVIDER=openai"
-    echo "    LLM_BASE_URL=http://127.0.0.1:11434/v1"
-    echo "    LLM_MODEL=qwen2.5:7b"
-    echo "    LLM_API_KEY=  （留空）"
+    # 检测 Ollama 是否已安装，给出对应建议
+    if command -v ollama &>/dev/null; then
+        OLLAMA_RUNNING=false
+        if curl -s http://127.0.0.1:11434/api/tags &>/dev/null 2>&1; then
+            OLLAMA_RUNNING=true
+        fi
+        echo "  ✅ 检测到 Ollama 已安装（完全免费方案）："
+        if $OLLAMA_RUNNING; then
+            echo "     Ollama 正在运行，可直接使用以下配置："
+        else
+            echo "     请先启动 Ollama（另开终端运行：ollama serve）"
+            echo "     然后拉取模型（首次约需几分钟）："
+            echo "       ollama pull qwen2.5:7b"
+        fi
+        echo ""
+        echo "     在 .env 中填入："
+        echo "       LLM_PROVIDER=openai"
+        echo "       LLM_BASE_URL=http://127.0.0.1:11434/v1"
+        echo "       LLM_MODEL=qwen2.5:7b"
+        echo "       LLM_API_KEY=  （留空）"
+    else
+        echo "  💡 没有 API Key？可以用免费本地模型（Ollama）："
+        echo "     macOS/Linux 安装：curl -fsSL https://ollama.com/install.sh | sh"
+        echo "     安装后拉取模型：ollama pull qwen2.5:7b"
+        echo "     然后在 .env 填：LLM_BASE_URL=http://127.0.0.1:11434/v1  LLM_MODEL=qwen2.5:7b"
+        echo ""
+        echo "  或使用低价 API（国内可用）："
+        echo "     DeepSeek：https://platform.deepseek.com  →  LLM_BASE_URL=https://api.deepseek.com/v1  LLM_MODEL=deepseek-chat"
+        echo "     MiniMax： https://www.minimaxi.com       →  LLM_BASE_URL=https://api.minimaxi.com/v1  LLM_MODEL=MiniMax-M2.7"
+    fi
     echo ""
     echo "  填好后重新运行：bash start.sh"
     echo ""

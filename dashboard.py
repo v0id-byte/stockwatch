@@ -1070,30 +1070,68 @@ def _onboarding_panel(data: dict, settings: dict[str, str]) -> str:
     ])
     levels_ready = bool(settings.get("ALERT_LEVELS"))
     watch_ready = bool(data.get("positions") or data.get("price_alerts"))
+
+    # (label, done, hint, href, detail)
     steps = [
-        ("添加自选股", watch_count > 0, f"当前 {watch_count} 只", "/settings/watchlist"),
-        ("配置模型", model_ready, "用于解释公告、新闻和问答", "/settings/model"),
-        ("选择通知方式", channel_ready, "可先用仅 Web 控制台", "/settings/channels"),
-        ("设置打扰级别", levels_ready, "先只收必须看和建议看", "/settings/features"),
-        ("添加持仓或关键价", watch_ready, "让系统围绕你的真实关注点提醒", "/console"),
+        (
+            "第1步：添加自选股",
+            watch_count > 0,
+            f"当前 {watch_count} 只" if watch_count > 0 else "填入6位股票代码，逗号分隔",
+            "/settings/watchlist",
+            "约1分钟 · 这是系统监控的标的范围",
+        ),
+        (
+            "第2步：配置 AI 模型",
+            model_ready,
+            "已配置" if model_ready else "推荐：免费 Ollama 本地模型 或 DeepSeek API",
+            "/settings/model",
+            "约3分钟 · 用于解读公告新闻、生成建议",
+        ),
+        (
+            "第3步：选择通知方式",
+            channel_ready,
+            "已配置" if channel_ready else "推荐先选「仅 Web 控制台」，无需配飞书",
+            "/settings/channels",
+            "约1分钟 · 决定提醒发到哪里",
+        ),
+        (
+            "第4步：设置打扰级别",
+            levels_ready,
+            "已配置" if levels_ready else "推荐只收「必须看」和「建议看」",
+            "/settings/features",
+            "约1分钟 · 控制哪些提醒推给你",
+        ),
+        (
+            "第5步：添加持仓或关键价",
+            watch_ready,
+            "已添加" if watch_ready else "让系统围绕你真实关注的点提醒，而不是泛泛扫描",
+            "/console",
+            "按需 · 可随时在 AI 控制台里添加",
+        ),
     ]
     rows = []
-    for label, done, hint, href in steps:
+    for label, done, hint, href, detail in steps:
         cls = "step-row done" if done else "step-row"
-        status = "已完成" if done else "待设置"
+        status = "✓" if done else "→"
         rows.append(
             f"<a class='{cls}' href='{href}'>"
             f"<span class='step-status'>{status}</span>"
+            f"<div class='step-body'>"
             f"<strong>{_e(label)}</strong>"
-            f"<span>{_e(hint)}</span>"
+            f"<span class='step-hint'>{_e(hint)}</span>"
+            f"<span class='step-detail'>{_e(detail)}</span>"
+            f"</div>"
             "</a>"
         )
-    ready_count = sum(1 for _, done, _, _ in steps if done)
+    ready_count = sum(1 for _, done, _, _, _ in steps if done)
+    all_done = ready_count == len(steps)
+    done_msg = "全部完成！可以运行一次 <code>python main.py once</code> 或点下方「运行一次」试试。" if all_done else ""
     return f"""
     <section class="panel onboarding">
       <div>
         <h2>开始使用</h2>
-        <p>先完成这几步，就能把“持续盯盘”变成“有事再看”。</p>
+        <p>按顺序完成这5步，大约10分钟，就能把"持续盯盘"变成"有事再看"。</p>
+        {f"<p class='onboarding-done'>{done_msg}</p>" if done_msg else ""}
       </div>
       <div class="setup-progress">{ready_count}/{len(steps)} 已完成</div>
       <div class="step-list">{''.join(rows)}</div>
@@ -1110,8 +1148,8 @@ def _compliance_notice() -> str:
     <section class="compliance">
       <h2>合规边界</h2>
       <p>StockWatch 是自选股盯盘提醒、公开信息聚合和持仓风险复核工具，不是证券投资咨询服务，也不是荐股软件。</p>
-      <p>“机会观察”“风险复核”等提示只表示值得进一步查看，不构成买入、卖出或收益承诺；请自行核验交易所公告、上市公司披露和券商行情。</p>
-      <p>“风险价”“观察压力位”只是用户确认后的提醒线，不代表止盈止损建议或自动交易指令。</p>
+      <p>"机会观察""风险复核"等提示只表示值得进一步查看，不构成买入、卖出或收益承诺；请自行核验交易所公告、上市公司披露和券商行情。</p>
+      <p>"风险价""观察压力位"只是用户确认后的提醒线，不代表止盈止损建议或自动交易指令。</p>
     </section>
     """
 
@@ -1237,32 +1275,41 @@ def _layout(active: str, title: str, subtitle: str, content: str,
       gap: 10px;
     }}
     .step-row {{
-      display: grid;
-      gap: 5px;
-      min-height: 104px;
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      min-height: 90px;
       padding: 12px;
       border: 1px solid var(--line);
       border-radius: 8px;
       background: var(--panel-soft);
       color: var(--text);
       text-decoration: none;
+      transition: border-color .15s;
     }}
-    .step-row:hover {{ border-color: var(--blue); }}
-    .step-row strong {{ font-size: 15px; }}
-    .step-row span:last-child {{ color: var(--muted); font-size: 12px; }}
+    .step-row:hover {{ border-color: var(--blue); background: var(--panel); }}
+    .step-body {{ display: flex; flex-direction: column; gap: 3px; flex: 1; }}
+    .step-body strong {{ font-size: 14px; line-height: 1.3; }}
+    .step-hint {{ color: var(--muted); font-size: 12px; }}
+    .step-detail {{ color: var(--muted); font-size: 11px; margin-top: 2px; opacity: .7; }}
     .step-status {{
-      width: fit-content;
-      padding: 2px 7px;
-      border-radius: 999px;
+      flex-shrink: 0;
+      width: 22px;
+      height: 22px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 50%;
       background: #fff4e5;
       color: var(--orange);
-      font-size: 12px;
-      font-weight: 650;
+      font-size: 13px;
+      font-weight: 700;
     }}
     .step-row.done .step-status {{
       background: #eef8f2;
       color: var(--green);
     }}
+    .onboarding-done {{ color: var(--green) !important; font-weight: 600; margin-top: 6px !important; }}
     .feedback, .compliance {{
       max-width: 1080px;
       margin-top: 28px;
@@ -1739,21 +1786,115 @@ def render_model_settings(settings: dict[str, str], notice: str = "") -> str:
         ("local", "本地 OpenAI-compatible"),
         ("minimax", "MiniMax 兼容"),
     ])
+    # Quick-select presets for common free/low-cost models
+    presets = [
+        {
+            "id": "ollama",
+            "name": "🏠 Ollama 本地",
+            "badge": "完全免费",
+            "badge_cls": "green",
+            "desc": "运行在自己电脑上，数据不出本机",
+            "install": "需先安装 Ollama：<a href='https://ollama.com' target='_blank' rel='noopener'>ollama.com</a>，然后运行 <code>ollama pull qwen2.5:7b</code>",
+            "provider": "openai",
+            "base_url": "http://127.0.0.1:11434/v1",
+            "model": "qwen2.5:7b",
+            "api_key": "",
+        },
+        {
+            "id": "deepseek",
+            "name": "⚡ DeepSeek",
+            "badge": "低价",
+            "badge_cls": "blue",
+            "desc": "国内直连，价格极低，质量不错",
+            "install": "注册 <a href='https://platform.deepseek.com' target='_blank' rel='noopener'>platform.deepseek.com</a> 获取 API Key",
+            "provider": "openai",
+            "base_url": "https://api.deepseek.com/v1",
+            "model": "deepseek-chat",
+            "api_key": "",
+        },
+        {
+            "id": "minimax",
+            "name": "🇨🇳 MiniMax",
+            "badge": "国内可用",
+            "badge_cls": "blue",
+            "desc": "国内服务，稳定，中文理解好",
+            "install": "注册 <a href='https://www.minimaxi.com' target='_blank' rel='noopener'>minimaxi.com</a> 获取 API Key",
+            "provider": "openai",
+            "base_url": "https://api.minimaxi.com/v1",
+            "model": "MiniMax-M2.7",
+            "api_key": "",
+        },
+        {
+            "id": "claude",
+            "name": "🌟 Claude",
+            "badge": "质量最高",
+            "badge_cls": "orange",
+            "desc": "Anthropic 出品，金融文本理解最强",
+            "install": "注册 <a href='https://console.anthropic.com' target='_blank' rel='noopener'>console.anthropic.com</a> 获取 API Key",
+            "provider": "anthropic",
+            "base_url": "https://api.anthropic.com",
+            "model": "claude-sonnet-4-6",
+            "api_key": "",
+        },
+    ]
+    preset_cards = []
+    for p in presets:
+        badge_color = {"green": "#2db55d", "blue": "#2563eb", "orange": "#e8930a"}.get(p["badge_cls"], "#888")
+        preset_cards.append(f"""
+        <div class="preset-card" onclick="applyPreset({_e(p['provider'])!r},{_e(p['base_url'])!r},{_e(p['model'])!r})">
+          <div class="preset-header">
+            <strong>{p['name']}</strong>
+            <span class="preset-badge" style="background:{badge_color}20;color:{badge_color}">{p['badge']}</span>
+          </div>
+          <div class="preset-desc">{p['desc']}</div>
+          <div class="preset-install">{p['install']}</div>
+        </div>
+        """)
+
     content = f"""
     <section class="panel">
-      <h2>模型配置</h2>
+      <h2>推荐配置（点击自动填入）</h2>
+      <p style="margin:0 0 12px;color:var(--muted);font-size:13px;">选一个适合你的方案，填好 API Key 后点保存。</p>
+      <div class="preset-grid">{''.join(preset_cards)}</div>
+    </section>
+    <section class="panel" style="margin-top:16px">
+      <h2>手动配置</h2>
       <form method="post" action="/settings/model">
         <div class="form-grid">
           {_field("模型提供商", provider_select)}
-          {_field("模型代号", f"<input name='llm_model' value='{_e(settings.get('LLM_MODEL', ''))}' placeholder='MiniMax-M2.7'>")}
-          {_field("接口地址", f"<input name='llm_base_url' value='{_e(settings.get('LLM_BASE_URL', ''))}' placeholder='https://api.example.com/v1'>", "Anthropic 可用 https://api.anthropic.com；本地模型可用 http://127.0.0.1:11434/v1")}
-          {_field("API Key", f"<input type='password' name='llm_api_key' placeholder='留空不修改，当前：{_e(_mask_secret(settings.get('LLM_API_KEY', '')))}'>", "本地 OpenAI-compatible 服务通常可以留空")}
+          {_field("模型代号", f"<input id='f-model' name='llm_model' value='{_e(settings.get('LLM_MODEL', ''))}' placeholder='MiniMax-M2.7'>")}
+          {_field("接口地址", f"<input id='f-base-url' name='llm_base_url' value='{_e(settings.get('LLM_BASE_URL', ''))}' placeholder='https://api.example.com/v1'>", "Anthropic 可用 https://api.anthropic.com；本地模型可用 http://127.0.0.1:11434/v1")}
+          {_field("API Key", f"<input id='f-api-key' type='password' name='llm_api_key' placeholder='留空不修改，当前：{_e(_mask_secret(settings.get('LLM_API_KEY', '')))}'>", "本地 OpenAI-compatible 服务通常可以留空")}
         </div>
         {_save_button()}
       </form>
     </section>
+    <style>
+    .preset-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}}
+    .preset-card{{padding:14px;border:1px solid var(--line);border-radius:8px;cursor:pointer;background:var(--panel-soft);transition:border-color .15s}}
+    .preset-card:hover{{border-color:var(--blue);background:var(--panel)}}
+    .preset-header{{display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:6px}}
+    .preset-header strong{{font-size:14px}}
+    .preset-badge{{font-size:11px;padding:2px 7px;border-radius:999px;font-weight:600;white-space:nowrap}}
+    .preset-desc{{font-size:12px;color:var(--muted);margin-bottom:6px}}
+    .preset-install{{font-size:11px;color:var(--muted)}}
+    .preset-install a{{color:var(--blue)}}
+    .preset-install code{{background:var(--panel-soft);padding:1px 4px;border-radius:3px;font-size:11px}}
+    </style>
+    <script>
+    function applyPreset(provider, baseUrl, model) {{
+      var sel = document.querySelector('select[name="llm_provider"]');
+      if (sel) sel.value = provider;
+      var bu = document.getElementById('f-base-url');
+      if (bu) bu.value = baseUrl;
+      var m = document.getElementById('f-model');
+      if (m) m.value = model;
+      document.getElementById('f-api-key').placeholder = '请在此输入该服务的 API Key';
+      document.getElementById('f-api-key').focus();
+    }}
+    </script>
     """
-    return _layout("model", "模型配置", "配置任意模型服务或本地模型", content, settings, notice)
+    return _layout("model", "模型配置", "选一个免费方案或填入自己的 API Key", content, settings, notice)
 
 
 def render_channel_settings(settings: dict[str, str], notice: str = "") -> str:
@@ -1849,7 +1990,7 @@ def render_feature_settings(settings: dict[str, str], notice: str = "") -> str:
         </div>
         <div class="options">
           <label class="option-row"><input type="checkbox" name="enable_reassurance_mode" value="true"{_checked(settings.get('ENABLE_REASSURANCE_MODE', 'false'))}>安心模式</label>
-          <label class="option-row"><input type="checkbox" name="enable_after_close_summary" value="true"{_checked(settings.get('ENABLE_AFTER_CLOSE_SUMMARY', 'false'))}>休市后“不用盯盘”总结</label>
+          <label class="option-row"><input type="checkbox" name="enable_after_close_summary" value="true"{_checked(settings.get('ENABLE_AFTER_CLOSE_SUMMARY', 'false'))}>休市后"不用盯盘"总结</label>
           <label class="option-row"><input type="checkbox" name="enable_family_brief" value="true"{_checked(settings.get('ENABLE_FAMILY_BRIEF', 'false'))}>一句话家庭版提醒</label>
         </div>
         {_save_button()}
