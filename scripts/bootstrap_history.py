@@ -15,7 +15,11 @@ sys.path.insert(0, str(ROOT))
 
 from data.market import MarketData
 
-DEFAULT_INDEX_SYMBOLS = ("000300", "000905")  # HS300 + CSI500
+# HS300 + CSI500 + CSI1000 (~1800 investable names). Broader training breadth
+# modestly improves cross-sectional IC. For max breadth add CSI2000 (932000) via
+# STOCKWATCH_INDEX_SYMBOLS=000300,000905,000852,932000 — but the extra micro-caps
+# mostly inflate backtested return via illiquidity, they do not cut drawdown.
+DEFAULT_INDEX_SYMBOLS = ("000300", "000905", "000852")
 PROXY_ENV_KEYS = (
     "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
     "http_proxy", "https_proxy", "all_proxy",

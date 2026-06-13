@@ -98,3 +98,26 @@ class TestRegimeFeature:
         # falls back to universal when the bear model is absent
         (tmp_path / "lgbm_bear.txt").unlink()
         assert cfg.resolve_lgbm_model_path("bear").name == "lgbm.txt"
+
+
+class TestFundamentalPipeline:
+    """ocf_to_eps was validated NOT to improve the bear model OOS, so it must stay
+    out of the production feature set; the PIT pipeline remains as opt-in infra."""
+
+    def test_ocf_not_in_bear_features(self):
+        from analysis.factors import BEAR_FEATURES
+        assert "ocf_to_eps" not in BEAR_FEATURES
+
+    def test_recent_quarter_ends_descending(self):
+        from analysis.fundamental import _recent_quarter_ends
+        ends = _recent_quarter_ends(3)
+        assert len(ends) == 3
+        assert ends == sorted(ends, reverse=True)  # most recent first
+        assert all(len(e) == 8 and e[4:] in {"0331", "0630", "0930", "1231"} for e in ends)
+
+    def test_merge_fundamental_graceful_without_file(self, tmp_path):
+        import pandas as pd
+        from scripts.build_training_set import _merge_fundamental
+        data = pd.DataFrame({"trade_date": ["2024-06-01"], "code": ["600519"], "X": [1.0]})
+        out, ok = _merge_fundamental(data, tmp_path)  # no fundamental parquet here
+        assert ok is False and "ocf_to_eps" in out.columns and out["ocf_to_eps"].iloc[0] == 0.0

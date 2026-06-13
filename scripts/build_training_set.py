@@ -33,6 +33,40 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+FUNDAMENTAL_FEATURES = ["ocf_to_eps"]
+
+
+def _merge_fundamental(data, root):
+    """Strict point-in-time as-of merge of fundamental features by announcement date.
+
+    A row for trade date D only sees reports announced strictly BEFORE D
+    (allow_exact_matches=False); reports older than ~400 days are treated as stale
+    and reset to neutral (0). Missing -> 0 (neutral after rank-normalization)."""
+    import pandas as pd
+
+    path = root / "fundamental_features.parquet"
+    cols = FUNDAMENTAL_FEATURES
+    if not path.exists():
+        for c in cols:
+            data[c] = 0.0
+        return data, False
+    fund = pd.read_parquet(path, columns=["code", "available_at", *cols])
+    fund["code"] = fund["code"].astype(str).str.zfill(6)
+    fund["available_at"] = pd.to_datetime(fund["available_at"]).astype("datetime64[ns]")
+    fund = fund.dropna(subset=["available_at"]).sort_values("available_at")
+    d = data.copy()
+    d["_td"] = pd.to_datetime(d["trade_date"]).astype("datetime64[ns]")
+    d["code"] = d["code"].astype(str).str.zfill(6)
+    d = d.sort_values("_td")
+    merged = pd.merge_asof(d, fund, left_on="_td", right_on="available_at",
+                           by="code", direction="backward", allow_exact_matches=False)
+    stale = (merged["_td"] - merged["available_at"]).dt.days > 400
+    for c in cols:
+        merged.loc[stale, c] = 0.0
+        merged[c] = pd.to_numeric(merged[c], errors="coerce").fillna(0.0)
+    return merged.drop(columns=["_td", "available_at"]), True
+
+
 def _forward_return(close, horizon: int):
     return close.shift(-horizon) / close - 1
 
@@ -102,6 +136,8 @@ def main():
     else:
         for name in PROPAGATION_FEATURES:
             data[name] = 0.0
+    data, fundamental_enabled = _merge_fundamental(data, root)
+    feature_names.extend(FUNDAMENTAL_FEATURES)
     data["label"] = data.groupby("trade_date")["label_score"].transform(
         lambda values: (values.rank(method="first", pct=True) * 10).clip(0, 9).astype(int)
     )
@@ -121,6 +157,8 @@ def main():
         "features": len(ALPHA158_FEATURES),
         "propagation_features_enabled": enable_propagation,
         "propagation_features": PROPAGATION_FEATURES if enable_propagation else [],
+        "fundamental_enabled": fundamental_enabled,
+        "fundamental_features": FUNDAMENTAL_FEATURES if fundamental_enabled else [],
         "total_features": len(feature_names),
         "label_horizon_days": label_horizon,
         "drawdown_penalty": drawdown_penalty,

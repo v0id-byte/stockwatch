@@ -330,6 +330,17 @@ def once():
             min_hist = max(WINDOWS)
             kline_len = {d["code"]: len(d.get("kline", [])) for d in decisions}
             eligible = {c: f for c, f in factor_map.items() if kline_len.get(c, 0) >= min_hist}
+            # the bear model also uses an earnings-quality fundamental; inject the
+            # latest point-in-time value so online features match training
+            if "ocf_to_eps" in ranker.meta.get("features", []) and eligible:
+                try:
+                    from analysis.fundamental import get_latest_ocf_to_eps
+                    ocf = get_latest_ocf_to_eps(list(eligible))
+                    for code, factors in eligible.items():
+                        if code in ocf:
+                            factors["ocf_to_eps"] = ocf[code]
+                except Exception as e:
+                    logger.debug(f"基本面 ocf_to_eps 注入跳过: {e}")
             scores = ranker.predict_batch(eligible)
             for code in factor_map:
                 scores.setdefault(code, None)

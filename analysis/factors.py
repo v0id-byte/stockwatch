@@ -64,6 +64,14 @@ ROBUST_FEATURES = [
 BEAR_FEATURES = ROBUST_FEATURES + [
     "ILLIQ20", "ILLIQ60", "ILLIQ120", "DD60", "DD120", "MAX60", "IMIN60", "QTLD120",
 ]
+# NOTE on fundamentals: the earnings-quality factor `ocf_to_eps` (operating cash
+# flow / EPS) was built and tested as a bear-model diversifier. A clean out-of-sample
+# check (train bear-days <2024, test >=2024) showed it does NOT help — IC +0.1070
+# WITHOUT vs +0.1039 WITH — despite a high in-sample split gain (overfitting). So it
+# is intentionally NOT in BEAR_FEATURES. The PIT pipeline (scripts/
+# build_fundamental_features.py + the training-set merge + analysis/fundamental.py)
+# is kept as opt-in research infra: append "ocf_to_eps" (or another fundamental)
+# here to re-enable, and the online path will inject it automatically.
 BULL_FEATURES = [
     "MA20", "MA30", "MA60", "QTLD20", "QTLD30", "QTLD60", "QTLU60", "QTLU120", "IMIN30",
     "ILLIQ20", "ILLIQ60", "TURN120", "TURN250", "AMTMA120", "AMTMA250", "VMA120",
