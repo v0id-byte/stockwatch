@@ -363,6 +363,18 @@ def once():
         d["sentiment"] = detail.get("score", 0.0)
         d["sentiment_context"] = detail.get("context", "")
 
+    # 5b. 结构化事件（解禁/业绩预告/增减持/回购）作为消息面的风险/情境补充
+    if cfg.enable_events and decisions:
+        try:
+            from analysis.events import collect_events, format_events_context
+            events_by_code = collect_events([d["code"] for d in decisions])
+            for d in decisions:
+                ctx = format_events_context(events_by_code.get(d["code"], []))
+                if ctx:
+                    d["sentiment_context"] = "\n".join(p for p in [d.get("sentiment_context", ""), ctx] if p)
+        except Exception as e:
+            logger.warning(f"事件提醒获取失败，跳过: {e}")
+
     # 6. 最终决策
     engine = DecisionEngine(storage)
     all_alert_results = []

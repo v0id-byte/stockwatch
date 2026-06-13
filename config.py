@@ -270,6 +270,11 @@ class Config:
         return _env_bool("ENABLE_SECTOR", False)
 
     @property
+    def enable_events(self) -> bool:
+        # 结构化事件提醒（解禁/业绩预告/增减持/回购）作为风险/情境上下文，非涨跌预测
+        return _env_bool("ENABLE_EVENTS", False)
+
+    @property
     def enable_propagation(self) -> bool:
         return _env_bool("ENABLE_PROPAGATION", False)
 

@@ -121,3 +121,25 @@ class TestFundamentalPipeline:
         data = pd.DataFrame({"trade_date": ["2024-06-01"], "code": ["600519"], "X": [1.0]})
         out, ok = _merge_fundamental(data, tmp_path)  # no fundamental parquet here
         assert ok is False and "ocf_to_eps" in out.columns and out["ocf_to_eps"].iloc[0] == 0.0
+
+
+class TestEventLayer:
+    """The event layer is risk/context only — its notes must never read as price
+    predictions, and warnings (减持/首亏/big upcoming 解禁) sort before info."""
+
+    def test_format_orders_warnings_first_and_is_empty_safe(self):
+        from analysis.events import format_events_context
+        assert format_events_context([]) == ""
+        events = [
+            {"type": "回购", "date": "", "level": "info", "note": "回购方案"},
+            {"type": "减持", "date": "", "level": "warning", "note": "股东净减持"},
+        ]
+        out = format_events_context(events)
+        assert "非买卖指令" in out
+        assert out.index("减持") < out.index("回购")  # warning first
+
+    def test_event_type_polarity_sets(self):
+        from analysis.events import _POS_YJYG, _NEG_YJYG
+        assert "首亏" in _NEG_YJYG and "续亏" in _NEG_YJYG
+        assert "预增" in _POS_YJYG
+        assert not (_POS_YJYG & _NEG_YJYG)  # no overlap

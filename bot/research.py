@@ -648,12 +648,22 @@ def answer_stock_question(question: str, stock: StockRef, market: MarketData, st
         "research_reports": reports,
     }
 
+    structured_events = []
+    try:
+        from config import get_config
+        if get_config().enable_events:
+            from analysis.events import collect_events
+            structured_events = [e["note"] for e in collect_events([stock.code]).get(stock.code, [])]
+    except Exception as e:
+        logger.debug(f"结构化事件跳过 {stock.code}: {e}")
+
     data_pack = {
         "question": question,
         "stock": {"code": stock.code, "name": name},
         "trend": trend,
         "announcements": announcements,
         "news": news,
+        "structured_events": structured_events,
         "reference_context": reference_context,
         "source_priority": "公告优先级: 巨潮资讯公告 > 东方财富公告大全 > 个股新闻 > 资金流/研报/财务/市场关注。",
     }
@@ -667,7 +677,7 @@ def answer_stock_question(question: str, stock: StockRef, market: MarketData, st
 
 固定结构：
 1. 先给一句“结论”
-2. “消息/公告”：优先引用公告来源，重组问题要说明最新状态和关键节点
+2. “消息/公告”：优先引用公告来源，重组问题要说明最新状态和关键节点；若 structured_events 非空，用一句话提示其中的风险/情境事件（解禁/业绩预告/增减持/回购），但说明这些是风险提示、不是涨跌预测
 3. “最近一周走势”：说明涨跌、区间高低、量能、技术状态
 4. “资金/基本面/关注度”：结合资金流、财务、研报、市场关注数据；没有数据就说未取到
 5. “中线视角”：结合20/60/120日表现，不要只看短线
