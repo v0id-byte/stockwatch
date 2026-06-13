@@ -245,6 +245,23 @@ class Config:
         return Path(os.path.expanduser(raw))
 
     @property
+    def market_regime(self) -> str:
+        """auto = 按 CSI300 站上/跌破年线自动判定；bull/bear = 用户手动锁定。"""
+        value = os.getenv("MARKET_REGIME", "auto").strip().lower()
+        return value if value in {"auto", "bull", "bear"} else "auto"
+
+    def resolve_lgbm_model_path(self, regime: str) -> Path:
+        """Bear regime uses the bear-specialized model (validated OOS lift); every
+        other regime uses the universal model. Falls back to universal if the
+        bear model file is missing."""
+        base = self.lgbm_model_path
+        if regime == "bear":
+            bear = base.with_name(base.stem + "_bear" + base.suffix)
+            if bear.exists():
+                return bear
+        return base
+
+    @property
     def enable_regime(self) -> bool:
         return _env_bool("ENABLE_REGIME", False)
 

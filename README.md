@@ -497,6 +497,23 @@ STOCKWATCH_LGBM_FEATURE_SET=all python scripts/train_lgbm.py     # 全部 Alpha1
 STOCKWATCH_LGBM_FEATURE_SET=stable python scripts/train_lgbm.py  # 旧版子集（含不稳定风险因子）
 ```
 
+#### 牛熊分模型（`MARKET_REGIME`，v2.2 起）
+
+实测发现：A 股截面因子 IC 在**熊市/震荡里比强牛市强约 2 倍**，且流动性等因子只在 risk-off 有效。所以做了**非对称**的牛熊处理（用 CSI300 站上/跌破年线 `MA200` 做点位内判定）：
+
+- **熊市**：用熊市特化模型 `lgbm_bear.txt`（通用 robust 集 **再加回**流动性、超跌/回撤因子）。样本外检验（2022–2023 训练 → 2024 熊市日测试）IC 由通用的 **+0.076 提升到 +0.096**，确有增益。
+- **牛市/普通**：直接用通用模型。**单独训练的牛市模型样本外反而更差**（牛市截面 alpha 太薄，剔除反转反而丢信号），所以不单设牛市模型——这就是"非对称"。
+
+```bash
+# 训练熊市特化模型（输出 models/lgbm_bear.txt），与通用 lgbm.txt 一起拷到部署机
+STOCKWATCH_LGBM_REGIME=bear python scripts/train_lgbm.py
+
+# 部署端开关：auto=按年线自动判牛熊；bull/bear=手动锁定
+# .env: MARKET_REGIME=auto
+```
+
+> 数据局限：这 4 年只有约 1 段牛市、~1.5 段熊市,牛市侧无法做干净的样本外验证;熊市增益经过了样本外检验。模型保持简单透明以抑制过拟合。
+
 `build_training_set.py` 默认会生成关联补涨传播特征：当某只股票成为放量领涨股时，系统用过去窗口估计“领涨股前一日收益 → 候选股当日收益”的滞后相关，并把领涨幅度、放量、相关强度、候选未反应程度和传播分写入训练集。这个过程只使用当日及以前可见数据；如需关闭：
 
 ```bash
@@ -512,9 +529,10 @@ STOCKWATCH_ENABLE_PROPAGATION_FEATURES=false python scripts/build_training_set.p
 ```bash
 python main.py backtest --signal model        # 用训练好的模型打分
 python main.py backtest --signal composite     # 不依赖模型文件，用 robust 因子等权 z-score 复现
+python main.py backtest --signal regime        # 牛熊分模型（熊市用 lgbm_bear，牛市用通用），含牛/熊分段 IC 对比
 ```
 
-输出包含：逐年横截面 IC（方向是否每年都对）、非重叠 20 日持有期的 top-k 多头组合（扣双边成本）相对 CSI300、等权universe、无风险的 CAGR / 波动 / Sharpe / 最大回撤 / 跑赢占比，以及分位前向收益。
+输出包含：逐年横截面 IC（方向是否每年都对）、非重叠 20 日持有期的 top-k 多头组合（扣双边成本）相对 CSI300、等权universe、无风险的 CAGR / 波动 / Sharpe / 最大回撤 / 跑赢占比，以及分位前向收益。`--signal regime` 还会打印牛市日 / 熊市日各自的 regime-aware vs 通用模型 IC 对比。
 
 **本地历史（2022-01 ~ 2026-05，约 1473 只）上的实测**（仅研究复盘，非收益承诺）：重建后的模型**逐年横截面 IC 均为正**（2022 +0.09、2023 +0.08、2024 +0.10、2025 +0.05、2026YTD +0.03），而旧 `stable` 模型样本外 IC 为 **−0.024**（方向反了）。样本外（2025 起）top50 多头组合年化约 +11%、Sharpe≈0.65、最大回撤≈-8%，稳定高于无风险（约 2%），并在 2022 熊市跑赢 CSI300。
 

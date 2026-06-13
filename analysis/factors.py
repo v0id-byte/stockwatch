@@ -52,6 +52,24 @@ ROBUST_FEATURES = [
     "VMA120", "VMA250", "VSUMN60", "VSUMN120", "CORD60", "RESI10", "WVMA20",
 ]
 
+# Regime-specialized sets (used by MARKET_REGIME / STOCKWATCH_LGBM_REGIME). On A-share
+# history (2022-2026) cross-sectional factor IC is ~2x stronger in bear/sideways than in
+# strong bull markets, and a few factors (illiquidity, low-vol) are predictive in risk-off
+# but flat in bull. So the two regimes are handled asymmetrically:
+#   BEAR — high-conviction defensive stock-picking: robust set PLUS illiquidity, deeper
+#          oversold (drawdown / distance-from-high) factors, which measurably lift bear IC.
+#   BULL — light touch: cross-sectional alpha is thin in strong uptrends, so drop the
+#          short-term reversal factors (don't fight winners) and keep only the position /
+#          liquidity / low-turnover factors that stay weakly positive in bull.
+BEAR_FEATURES = ROBUST_FEATURES + [
+    "ILLIQ20", "ILLIQ60", "ILLIQ120", "DD60", "DD120", "MAX60", "IMIN60", "QTLD120",
+]
+BULL_FEATURES = [
+    "MA20", "MA30", "MA60", "QTLD20", "QTLD30", "QTLD60", "QTLU60", "QTLU120", "IMIN30",
+    "ILLIQ20", "ILLIQ60", "TURN120", "TURN250", "AMTMA120", "AMTMA250", "VMA120",
+    "VMA250", "VSUMN60",
+]
+
 
 def cross_sectional_rank_normalize(frame: "pd.DataFrame", columns: list[str]) -> "pd.DataFrame":
     """Per-column cross-sectional percentile rank centered to [-0.5, 0.5].

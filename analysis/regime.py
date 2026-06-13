@@ -18,6 +18,36 @@ DEFAULT_REGIME = {
     "context": "大盘 regime: normal (未启用或数据不足)",
 }
 
+TREND_INDEX = "sh000300"  # CSI300, matches the backtest benchmark
+TREND_MA_WINDOW = 200     # ~年线；站上=牛/risk-on，跌破=熊/risk-off
+
+
+def is_bull_trend(closes: pd.Series, ma_window: int = TREND_MA_WINDOW) -> pd.Series:
+    """Point-in-time bull flag: close above its trailing moving average.
+
+    Pure and reusable offline (pass an index close series) and online. Rows before
+    the MA is defined are NaN (caller decides the default)."""
+    closes = pd.to_numeric(closes, errors="coerce")
+    ma = closes.rolling(ma_window, min_periods=ma_window).mean()
+    return closes > ma
+
+
+def current_trend_regime(market, ma_window: int = TREND_MA_WINDOW) -> str:
+    """Latest 'bull'/'bear' from CSI300 vs its long MA. Falls back to 'bull' (neutral,
+    use the universal model) when the index history is unavailable."""
+    try:
+        rows = market.get_index_kline(TREND_INDEX, limit=ma_window + 60)
+        if len(rows) < ma_window:
+            return "bull"
+        closes = pd.DataFrame(rows).sort_values("trade_date")["close"]
+        flag = is_bull_trend(closes, ma_window).iloc[-1]
+        if pd.isna(flag):
+            return "bull"
+        return "bull" if bool(flag) else "bear"
+    except Exception as e:
+        logger.warning(f"趋势 regime 判定失败，按 bull 处理: {e}")
+        return "bull"
+
 
 def _regime_for_percentile(percentile: float) -> tuple[str, float]:
     if percentile > 0.9:

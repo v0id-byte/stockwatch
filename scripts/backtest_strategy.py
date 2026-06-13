@@ -30,7 +30,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from analysis.factors import ROBUST_FEATURES
+from analysis.factors import ROBUST_FEATURES, BEAR_FEATURES, BULL_FEATURES
+from analysis.regime import is_bull_trend
 
 
 def _winsor_z(s):
@@ -58,11 +59,14 @@ _COMPOSITE_SIGN = {
 def _load(history_dir: Path, target: str):
     import numpy as np
     import pandas as pd
+    import pyarrow.parquet as pq
 
     data_path = history_dir / "training_set.parquet"
     if not data_path.exists():
         raise SystemExit(f"训练集缺失: {data_path}（先运行 build_training_set.py）")
-    feats = [f for f in ROBUST_FEATURES]
+    feats = sorted(set(ROBUST_FEATURES) | set(BEAR_FEATURES) | set(BULL_FEATURES))
+    avail = set(pq.ParquetFile(data_path).schema.names)
+    feats = [f for f in feats if f in avail]
     cols = ["trade_date", "code", target] + feats
     df = pd.read_parquet(data_path, columns=cols)
     df["trade_date"] = pd.to_datetime(df["trade_date"])
@@ -76,38 +80,53 @@ def _load(history_dir: Path, target: str):
         csi = csi.sort_values("trade_date").reset_index(drop=True)
         csi["fwd"] = csi["close"].shift(-20) / csi["close"] - 1
         csi_fwd = dict(zip(csi["trade_date"], csi["fwd"]))
+        csi["bull"] = is_bull_trend(csi["close"]).to_numpy()
+        df["bull"] = df["trade_date"].map(dict(zip(csi["trade_date"], csi["bull"])))
+    else:
+        df["bull"] = True
     return df, feats, csi_fwd
 
 
-def _score(df, feats, signal: str, model_path: Path):
-    import numpy as np
-    import pandas as pd
-
-    grouped = df.groupby("trade_date", sort=False)
-    if signal == "composite":
-        parts = []
-        for f in feats:
-            z = grouped[f].transform(_winsor_z) * _COMPOSITE_SIGN.get(f, 1)
-            parts.append(z)
-        df["score"] = pd.concat(parts, axis=1).mean(axis=1)
-        return df, "composite (equal-weight z-score of robust factors)"
-
-    # model: rank-normalize features within each date (matches training), then predict
+def _predict(df, model_path: Path, fallback_feats):
+    """Cross-sectionally rank-normalize the model's features per date (matching
+    training) and return the model's score for every row."""
     import lightgbm as lgb
     import json
     if not model_path.exists():
         raise SystemExit(f"模型缺失: {model_path}（先运行 train_lgbm.py，或用 --signal composite）")
     booster = lgb.Booster(model_file=str(model_path))
-    meta = json.loads((model_path.parent / "lgbm_meta.json").read_text()) if (model_path.parent / "lgbm_meta.json").exists() else {}
-    model_feats = meta.get("features", feats)
-    norm = df.copy()
-    g = norm.groupby("trade_date", sort=False)
+    meta_path = model_path.parent / model_path.name.replace(".txt", "_meta.json")
+    meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+    model_feats = meta.get("features", fallback_feats)
+    norm = df[["trade_date"]].copy()
+    g = df.groupby("trade_date", sort=False)
     for f in model_feats:
-        if f in norm.columns:
-            norm[f] = g[f].rank(pct=True) - 0.5
-        else:
-            norm[f] = 0.0
-    df["score"] = booster.predict(norm[model_feats])
+        norm[f] = (g[f].rank(pct=True) - 0.5) if f in df.columns else 0.0
+    return booster.predict(norm[model_feats])
+
+
+def _score(df, feats, signal: str, model_path: Path):
+    import pandas as pd
+
+    if signal == "composite":
+        grouped = df.groupby("trade_date", sort=False)
+        parts = [grouped[f].transform(_winsor_z) * _COMPOSITE_SIGN.get(f, 1) for f in feats]
+        df["score"] = pd.concat(parts, axis=1).mean(axis=1)
+        return df, "composite (equal-weight z-score of robust factors)"
+
+    if signal == "regime":
+        # Asymmetric: the bear specialization beats the universal model out-of-sample,
+        # but a bull-specialized model did NOT (bull alpha is too thin), so bull/normal
+        # days use the universal model. bear-trend days use lgbm_bear.
+        models_dir = model_path.parent
+        univ_score = _predict(df, models_dir / "lgbm.txt", feats)
+        bear_score = _predict(df, models_dir / "lgbm_bear.txt", feats)
+        df["score_univ"] = univ_score
+        df["score"] = pd.Series(univ_score, index=df.index).where(
+            df["bull"].fillna(True), pd.Series(bear_score, index=df.index))
+        return df, "regime-aware (universal on bull days, lgbm_bear on bear days)"
+
+    df["score"] = _predict(df, model_path, feats)
     return df, f"LightGBM model ({model_path.name})"
 
 
@@ -181,9 +200,33 @@ def _backtest(df, target, csi_fwd, hold, topk, cost, rf_annual, test_start):
     run([d for d in dates if d >= ts], "TEST / 样本外 (>= %s)" % test_start)
 
 
+def _per_regime_compare(df, target):
+    """Show regime-aware vs universal IC separately on bull-trend and bear-trend days —
+    the apples-to-apples evidence for whether the bull/bear split actually helps."""
+    import pandas as pd
+
+    def ic_on(mask, col):
+        ics = []
+        for _, g in df[mask].groupby("trade_date"):
+            if len(g) < 30 or g[col].nunique() <= 1:
+                continue
+            v = g[col].corr(g[target], method="spearman")
+            if pd.notna(v):
+                ics.append(v)
+        s = pd.Series(ics)
+        return (s.mean(), s.mean() / s.std() if len(s) and s.std() else 0, len(s))
+
+    print("\n=== regime 分段 IC：regime-aware vs 通用模型 ===")
+    print("  %-10s %20s %20s" % ("行情", "通用 IC(ICIR)", "regime-aware IC(ICIR)"))
+    for label, mask in [("熊市(bear)", df["bull"] == False), ("牛市(bull)", df["bull"] == True)]:  # noqa: E712
+        um, ui, _ = ic_on(mask, "score_univ")
+        rm, ri, n = ic_on(mask, "score")
+        print("  %-10s   %+.4f (%+.2f)        %+.4f (%+.2f)   [%d 日]" % (label, um, ui, rm, ri, n))
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description="StockWatch 量化信号回测（诚实、可复现）")
-    p.add_argument("--signal", choices=["model", "composite"], default="model")
+    p.add_argument("--signal", choices=["model", "composite", "regime"], default="model")
     p.add_argument("--history-dir", default=os.getenv("STOCKWATCH_HISTORY_DIR", "~/.stockwatch/history"))
     p.add_argument("--model-path", default=str(ROOT / "models" / "lgbm.txt"))
     p.add_argument("--target", default="forward_20d_return")
@@ -200,6 +243,8 @@ def main(argv=None):
     print("信号: %s   |   特征数: %d   |   样本: %d 行, %s ~ %s" % (
         desc, len(feats), len(df), df["trade_date"].min().date(), df["trade_date"].max().date()))
     _per_year_ic(df, args.target)
+    if args.signal == "regime" and "score_univ" in df.columns:
+        _per_regime_compare(df, args.target)
     _backtest(df, args.target, csi_fwd, args.hold, args.topk, args.cost, args.rf, args.test_start)
     return 0
 

@@ -318,7 +318,13 @@ def once():
         try:
             from analysis.lgbm import LgbmRanker, format_lgbm_context
             from analysis.factors import WINDOWS
-            ranker = LgbmRanker(cfg.lgbm_model_path)
+            from analysis.regime import current_trend_regime
+            regime = cfg.market_regime
+            if regime == "auto":
+                regime = current_trend_regime(market)
+            model_path = cfg.resolve_lgbm_model_path(regime)
+            logger.info(f"LGBM 市场状态={regime}, 模型={model_path.name}")
+            ranker = LgbmRanker(model_path)
             # Long-window factors need full history; stocks with too few klines would
             # feed fillna(0) features the model never saw in training, so skip them.
             min_hist = max(WINDOWS)

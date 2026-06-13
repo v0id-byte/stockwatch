@@ -11,8 +11,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from analysis.factors import ALPHA158_FEATURES, ROBUST_FEATURES
+from analysis.factors import ALPHA158_FEATURES, ROBUST_FEATURES, BEAR_FEATURES, BULL_FEATURES
 from analysis.propagation import PROPAGATION_FEATURES
+from analysis.regime import is_bull_trend
 
 STABLE_FEATURE_PREFIXES = (
     "ILLIQ", "BETA", "RSV", "DD", "RET", "ROC", "RELV", "STD",
@@ -51,6 +52,67 @@ def _split_by_date_with_purge(df, label_horizon: int):
         "train_end_exclusive": str(train_end.date()),
         "val_end_exclusive": str(val_end.date()),
         "purge_trading_days": purge_days,
+    }
+    return train, val, test, split
+
+
+def _regime() -> str:
+    value = os.getenv("STOCKWATCH_LGBM_REGIME", "all").strip().lower()
+    return value if value in {"all", "bull", "bear"} else "all"
+
+
+def _regime_feature_names(regime: str, available_columns: set[str]) -> tuple[str, list[str]]:
+    source = BEAR_FEATURES if regime == "bear" else BULL_FEATURES
+    return regime, [name for name in source if name in available_columns]
+
+
+def _filter_to_regime(df, history_dir, regime: str):
+    """Keep only the trade dates whose CSI300 trend matches the regime (point-in-time)."""
+    import pandas as pd
+
+    csi_path = history_dir / "market_sh000300.parquet"
+    if not csi_path.exists():
+        raise RuntimeError(f"按 regime 训练需要基准指数: {csi_path}")
+    csi = pd.read_parquet(csi_path)[["trade_date", "close"]].copy()
+    csi["trade_date"] = pd.to_datetime(csi["trade_date"])
+    csi = csi.sort_values("trade_date")
+    csi["bull"] = is_bull_trend(csi["close"].reset_index(drop=True)).to_numpy()
+    bull_by_date = dict(zip(csi["trade_date"], csi["bull"]))
+    want_bull = regime == "bull"
+    mask = df["trade_date"].map(bull_by_date)
+    kept = df[mask == want_bull]
+    return kept
+
+
+def _split_by_position_with_purge(df, label_horizon: int, frac_train=0.70, frac_val=0.15):
+    """Fraction-of-dates split with purge. Used for regime models, whose matching
+    trade dates are sparse/discontinuous at the recent end so a calendar 'last 6m'
+    split would leave validation/test nearly empty."""
+    import pandas as pd
+
+    dates = pd.Index(sorted(df["trade_date"].drop_duplicates()))
+    n = len(dates)
+    purge = max(0, label_horizon)
+    train_cut = max(1, int(n * frac_train))
+    val_cut = max(train_cut + 1, int(n * (frac_train + frac_val)))
+    if val_cut >= n:
+        raise RuntimeError("regime 样本日期过少，无法切分 train/val/test")
+    train_end = dates[max(0, train_cut - purge)]
+    val_start = dates[train_cut]
+    val_end = dates[max(train_cut + 1, val_cut - purge)]
+    test_start = dates[val_cut]
+    train = df[df["trade_date"] < train_end]
+    val = df[(df["trade_date"] >= val_start) & (df["trade_date"] < val_end)]
+    test = df[df["trade_date"] >= test_start]
+    split = {
+        "split_kind": "position_fraction",
+        "frac_train": frac_train,
+        "frac_val": frac_val,
+        "val_start": str(val_start.date()),
+        "test_start": str(test_start.date()),
+        "train_end_exclusive": str(train_end.date()),
+        "val_end_exclusive": str(val_end.date()),
+        "purge_trading_days": purge,
     }
     return train, val, test, split
 
@@ -298,12 +360,25 @@ def main():
     if return_col not in df.columns:
         return_col = "forward_5d_return"
 
-    feature_set, feature_names = _feature_names(set(df.columns))
+    regime = _regime()
+    if regime == "all":
+        feature_set, feature_names = _feature_names(set(df.columns))
+    else:
+        feature_set, feature_names = _regime_feature_names(regime, set(df.columns))
     if not feature_names:
-        raise RuntimeError("训练特征为空，请检查 STOCKWATCH_LGBM_FEATURE_SET")
+        raise RuntimeError("训练特征为空，请检查 STOCKWATCH_LGBM_FEATURE_SET / STOCKWATCH_LGBM_REGIME")
     df = _cross_sectional_rank_normalize(df, feature_names)
+    if regime != "all":
+        rows_before = len(df)
+        df = _filter_to_regime(df, root, regime)
+        print(f"regime={regime}: 保留 {len(df)}/{rows_before} 行（{regime} 行情交易日）")
+        if df.empty:
+            raise RuntimeError(f"regime={regime} 过滤后无样本")
 
-    train, val, test, split = _split_by_date_with_purge(df, label_horizon)
+    if regime == "all":
+        train, val, test, split = _split_by_date_with_purge(df, label_horizon)
+    else:
+        train, val, test, split = _split_by_position_with_purge(df, label_horizon)
     if train.empty or val.empty or test.empty:
         raise RuntimeError("训练/验证/测试切分为空，请检查历史数据跨度")
 
@@ -341,7 +416,8 @@ def main():
     per_year_ic = _per_year_ic(df, full_pred, return_col)
     out_dir = ROOT / "models"
     out_dir.mkdir(exist_ok=True)
-    model_path = out_dir / "lgbm.txt"
+    suffix = "" if regime == "all" else f"_{regime}"
+    model_path = out_dir / f"lgbm{suffix}.txt"
     model.save_model(str(model_path))
     importance = sorted(
         zip(feature_names, model.feature_importance(importance_type="gain")),
@@ -352,6 +428,7 @@ def main():
         "trained_at": datetime.now().isoformat(),
         "features": feature_names,
         "feature_set": feature_set,
+        "regime": regime,
         "feature_normalization": "cross_sectional_rank_pct_centered",
         "objective": params["objective"],
         "feature_count": len(feature_names),
@@ -390,7 +467,7 @@ def main():
             for name, gain in importance[:30]
         ],
     }
-    with open(out_dir / "lgbm_meta.json", "w") as f:
+    with open(out_dir / f"lgbm{suffix}_meta.json", "w") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
     print(f"model saved: {model_path}")
     print(f"validation={_summary(validation_metrics)}")

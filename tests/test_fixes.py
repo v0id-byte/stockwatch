@@ -66,3 +66,35 @@ class TestRobustFeatureSet:
         # a single-row batch is un-rankable -> neutral 0.0
         single = cross_sectional_rank_normalize(frame.head(1), ["RET20", "QTLD30"])
         assert (single[["RET20", "QTLD30"]] == 0.0).all().all()
+
+
+class TestRegimeFeature:
+    """Asymmetric regime model: bear uses the specialized model (validated OOS lift),
+    every other regime uses the universal model."""
+
+    def test_bear_set_adds_illiquidity_bull_drops_reversal(self):
+        from analysis.factors import ROBUST_FEATURES, BEAR_FEATURES, BULL_FEATURES
+        # bear = robust + illiquidity/oversold/drawdown
+        assert set(ROBUST_FEATURES).issubset(set(BEAR_FEATURES))
+        assert any(f.startswith("ILLIQ") for f in BEAR_FEATURES)
+        # bull is light-touch: no short-term reversal factors
+        assert not any(f.startswith(("RET", "RELV", "ROC")) for f in BULL_FEATURES)
+
+    def test_is_bull_trend(self):
+        import pandas as pd
+        from analysis.regime import is_bull_trend
+        assert bool(is_bull_trend(pd.Series([float(i) for i in range(250)])).iloc[-1]) is True
+        assert bool(is_bull_trend(pd.Series([float(250 - i) for i in range(250)])).iloc[-1]) is False
+
+    def test_resolve_model_path(self, tmp_path, monkeypatch):
+        (tmp_path / "lgbm.txt").write_text("x")
+        (tmp_path / "lgbm_bear.txt").write_text("x")
+        monkeypatch.setenv("LGBM_MODEL_PATH", str(tmp_path / "lgbm.txt"))
+        from config import Config
+        cfg = Config()
+        assert cfg.resolve_lgbm_model_path("bear").name == "lgbm_bear.txt"
+        assert cfg.resolve_lgbm_model_path("bull").name == "lgbm.txt"
+        assert cfg.resolve_lgbm_model_path("auto").name == "lgbm.txt"
+        # falls back to universal when the bear model is absent
+        (tmp_path / "lgbm_bear.txt").unlink()
+        assert cfg.resolve_lgbm_model_path("bear").name == "lgbm.txt"
