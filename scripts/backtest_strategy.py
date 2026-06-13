@@ -148,7 +148,7 @@ def _per_year_ic(df, target):
             print("  %-6d %+9.4f %+7.2f %8.2f %6d" % (y, s.mean(), icir, (s > 0).mean(), len(s)))
 
 
-def _backtest(df, target, csi_fwd, hold, topk, cost, rf_annual, test_start):
+def _backtest(df, target, csi_fwd, hold, topk, cost, rf_annual, test_start, bear_exposure=1.0):
     import numpy as np
     import pandas as pd
 
@@ -167,7 +167,11 @@ def _backtest(df, target, csi_fwd, hold, topk, cost, rf_annual, test_start):
             top = g.sort_values("score", ascending=False).head(topk)
             sel = set(top["code"])
             turn = 1.0 if not prev else 1 - len(prev & sel) / topk
-            port.append(top[target].mean() - turn * cost)
+            basket = top[target].mean() - turn * cost
+            # regime exposure dial: hold less (rest in risk-free) on bear-trend dates
+            is_bull = bool(g["bull"].iloc[0]) if "bull" in g.columns and pd.notna(g["bull"].iloc[0]) else True
+            exposure = 1.0 if is_bull else bear_exposure
+            port.append(exposure * basket + (1 - exposure) * rf_per)
             uni.append(g[target].mean())
             bench.append(csi_fwd.get(pd.Timestamp(d), np.nan))
             prev = sel
@@ -235,6 +239,8 @@ def main(argv=None):
     p.add_argument("--cost", type=float, default=0.0030, help="双边换手成本，默认 0.30%%")
     p.add_argument("--rf", type=float, default=0.02, help="无风险年化，默认 2%%")
     p.add_argument("--test-start", default="2025-01-01", help="样本外起始日")
+    p.add_argument("--bear-exposure", type=float, default=1.0,
+                   help="年线下（熊市）总仓位，0-1，其余视为无风险。降回撤的研究档位，默认 1.0（不减仓）")
     args = p.parse_args(argv)
 
     history_dir = Path(args.history_dir).expanduser()
@@ -245,7 +251,7 @@ def main(argv=None):
     _per_year_ic(df, args.target)
     if args.signal == "regime" and "score_univ" in df.columns:
         _per_regime_compare(df, args.target)
-    _backtest(df, args.target, csi_fwd, args.hold, args.topk, args.cost, args.rf, args.test_start)
+    _backtest(df, args.target, csi_fwd, args.hold, args.topk, args.cost, args.rf, args.test_start, args.bear_exposure)
     return 0
 
 
