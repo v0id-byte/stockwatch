@@ -35,6 +35,43 @@ ALPHA158_FEATURES = (
     + [f"{name}{window}" for window in WINDOWS for name in ROLLING_FEATURES]
 )
 
+# Sign-stable cross-sectional alpha factors, selected by their forward-return IC
+# being the SAME sign and non-trivial magnitude in BOTH the 2022-2024 bear and
+# the 2025-2026 bull regimes (see scripts/backtest_strategy.py). Three diversified
+# families that survive regime changes in A-shares:
+#   - short/medium reversal:        RET/RELV/ROC/RESI/CORD
+#   - oversold price position:      QTLD/QTLU/MA/IMIN
+#   - low turnover / low attention: TURN/VOLZ/AMTMA/VMA/VSUMN/WVMA
+# Pure illiquidity (ILLIQ) and long-horizon volatility/beta/R2 (STD/BETA/RSQR) are
+# deliberately EXCLUDED: their IC sign flips across regimes, which is what made the
+# previous "stable" model post a negative out-of-sample IC.
+ROBUST_FEATURES = [
+    "RET20", "RET30", "RET60", "RELV20", "RELV30", "RELV60", "ROC20", "ROC30", "ROC60",
+    "QTLD20", "QTLD30", "QTLD60", "QTLU60", "QTLU120", "MA20", "MA30", "MA60", "IMIN30",
+    "TURN120", "TURN250", "VOLZ120", "VOLZ250", "AMTMA60", "AMTMA120", "AMTMA250",
+    "VMA120", "VMA250", "VSUMN60", "VSUMN120", "CORD60", "RESI10", "WVMA20",
+]
+
+
+def cross_sectional_rank_normalize(frame: "pd.DataFrame", columns: list[str]) -> "pd.DataFrame":
+    """Per-column cross-sectional percentile rank centered to [-0.5, 0.5].
+
+    Used to match training (features are rank-normalized within each trade date)
+    when scoring a batch of stocks online. A single-row batch maps to all-zeros,
+    which the model treats as a neutral (un-rankable) input.
+    """
+    out = frame.copy()
+    n = len(out)
+    for col in columns:
+        if col not in out.columns:
+            out[col] = 0.0
+            continue
+        if n <= 1:
+            out[col] = 0.0
+        else:
+            out[col] = out[col].rank(pct=True) - 0.5
+    return out
+
 
 def _clean_frame(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()

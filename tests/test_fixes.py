@@ -1,0 +1,68 @@
+"""Regression tests for the review-confirmed bug fixes and the rebuilt quant signal."""
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+os.environ.setdefault("STOCKWATCH_SKIP_REQUIRED_CONFIG", "1")
+
+
+class TestReportNoLookahead:
+    """analysis/report.py must price an entry from the NEXT trading day's close,
+    not the (possibly intraday, not-yet-final) decision-day close."""
+
+    def _kline(self):
+        return [
+            {"trade_date": "2024-01-02", "close": 10.0},
+            {"trade_date": "2024-01-03", "close": 11.0},
+            {"trade_date": "2024-01-04", "close": 12.0},
+            {"trade_date": "2024-01-05", "close": 13.0},
+        ]
+
+    def test_entry_is_next_day_close(self):
+        import pytest
+        from analysis.report import _future_return
+        # decision on 2024-01-02 -> entry should be 2024-01-03 close (11.0), not 10.0
+        ret = _future_return(self._kline(), "2024-01-02", horizon=1)
+        assert ret == pytest.approx((12.0 / 11.0 - 1) * 100)
+
+    def test_returns_none_when_no_future_bar(self):
+        from analysis.report import _future_return
+        assert _future_return(self._kline(), "2024-01-05", horizon=1) is None
+
+
+class TestSafeNextRedirect:
+    """dashboard login must not honour off-site ?next= targets (open-redirect)."""
+
+    def test_blocks_external_and_protocol_relative(self):
+        from dashboard import _safe_next
+        assert _safe_next("https://evil.com") == "/"
+        assert _safe_next("//evil.com") == "/"
+        assert _safe_next("javascript:alert(1)") == "/"
+        assert _safe_next("\\\\evil.com") == "/"
+
+    def test_allows_local_paths(self):
+        from dashboard import _safe_next
+        assert _safe_next("/settings") == "/settings"
+        assert _safe_next("/") == "/"
+
+
+class TestRobustFeatureSet:
+    """The rebuilt model must use the sign-stable robust factor set, NOT the
+    unstable risk factors (STD/BETA/RSQR/ILLIQ) that produced a negative OOS IC."""
+
+    def test_robust_excludes_unstable_risk_factors(self):
+        from analysis.factors import ROBUST_FEATURES
+        for f in ROBUST_FEATURES:
+            assert not f.startswith(("STD", "BETA", "RSQR", "ILLIQ")), f
+        # and it keeps the validated reversal / position / turnover families
+        assert "RET20" in ROBUST_FEATURES and "QTLD30" in ROBUST_FEATURES and "TURN120" in ROBUST_FEATURES
+
+    def test_cross_sectional_rank_normalize(self):
+        import pandas as pd
+        from analysis.factors import cross_sectional_rank_normalize
+        frame = pd.DataFrame({"RET20": [1.0, 2.0, 3.0, 4.0], "QTLD30": [4.0, 3.0, 2.0, 1.0]})
+        out = cross_sectional_rank_normalize(frame, ["RET20", "QTLD30"])
+        assert out["RET20"].min() == -0.25 and out["RET20"].max() == 0.5
+        # a single-row batch is un-rankable -> neutral 0.0
+        single = cross_sectional_rank_normalize(frame.head(1), ["RET20", "QTLD30"])
+        assert (single[["RET20", "QTLD30"]] == 0.0).all().all()

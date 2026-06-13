@@ -282,7 +282,7 @@ class DecisionEngine:
         # ---- 涨停/ST/次新：强制 HOLD ----
         if kline and len(kline) >= 2:
             pct = (kline[-1]["close"] / kline[-2]["close"] - 1) * 100
-            if pct >= 9.5:
+            if pct >= 9.5 - 1e-9:  # 容差，避免恰好 9.5% 因浮点表示落到 9.4999… 而漏判
                 logger.info(f"{code}({name}) 涨停，强制 HOLD")
                 return self._hold_decision(code, name, current_price, "涨停禁止买入", analysis_payload)
         if "ST" in name or "*ST" in name or "退" in name:
@@ -337,7 +337,7 @@ class DecisionEngine:
         raw_confidence = float(result.get("confidence", 0))
         confidence = (
             self.calibrator.calibrate(action, raw_confidence)
-            if self.calibrator else raw_confidence
+            if self.calibrator else max(0.0, min(1.0, raw_confidence))
         )
         if self.calibrator:
             logger.info(f"{code} 置信度校准: raw={raw_confidence:.3f}, calibrated={confidence:.3f}")
@@ -364,6 +364,11 @@ class DecisionEngine:
                 target_price = support_price if 0 < support_price < current_price else current_price * 0.97
             if stop_loss <= 0 and action == "SELL":
                 stop_loss = resistance_price if resistance_price > current_price else current_price * 1.03
+            # 价位一致性：BUY 目标价须高于止损价（否则是自相矛盾的建议），SELL 反之
+            if action == "BUY" and target_price > 0 and stop_loss > 0 and target_price <= stop_loss:
+                target_price = round(max(current_price, stop_loss) * 1.05, 2)
+            if action == "SELL" and target_price > 0 and stop_loss > 0 and target_price >= stop_loss:
+                stop_loss = round(max(target_price, current_price) * 1.03, 2)
             if not position_basis:
                 position_basis = _default_position_basis(action, support_price, resistance_price)
 

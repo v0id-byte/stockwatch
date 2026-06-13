@@ -147,10 +147,12 @@ class Config:
 
     @property
     def notify_channel(self) -> str:
-        value = os.getenv("NOTIFY_CHANNEL", "feishu").strip().lower()
+        # 默认 web：与 .env.example / README 的「先用 Web 控制台、无需配飞书」一致，
+        # 避免缺失该项时默认走飞书、又因缺飞书凭证而启动校验失败。
+        value = os.getenv("NOTIFY_CHANNEL", "web").strip().lower()
         if value in {"feishu", "web"}:
             return value
-        return "feishu"
+        return "web"
 
     # === 数据源 ===
     @property

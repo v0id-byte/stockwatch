@@ -317,8 +317,16 @@ def once():
     if cfg.enable_lgbm and factor_map:
         try:
             from analysis.lgbm import LgbmRanker, format_lgbm_context
+            from analysis.factors import WINDOWS
             ranker = LgbmRanker(cfg.lgbm_model_path)
-            scores = {code: ranker.predict(factors) for code, factors in factor_map.items()}
+            # Long-window factors need full history; stocks with too few klines would
+            # feed fillna(0) features the model never saw in training, so skip them.
+            min_hist = max(WINDOWS)
+            kline_len = {d["code"]: len(d.get("kline", [])) for d in decisions}
+            eligible = {c: f for c, f in factor_map.items() if kline_len.get(c, 0) >= min_hist}
+            scores = ranker.predict_batch(eligible)
+            for code in factor_map:
+                scores.setdefault(code, None)
             lgbm_contexts = format_lgbm_context(scores)
         except Exception as e:
             logger.warning(f"LightGBM 推理失败，跳过: {e}")
@@ -398,7 +406,7 @@ def once():
                 push_status = "已写入 Web 控制台"
         else:
             push_status = "无可展示信号"
-    if feishu and not all_alert_results:
+    if feishu and not run_results:
         summary_ok = _send_after_close_summary(
             storage, feishu, final_decisions, run_results,
             tracked_positions, price_alerts,

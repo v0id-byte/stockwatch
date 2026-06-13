@@ -132,7 +132,7 @@ def demo(query: str = ""):
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python main.py [test|once|daemon|monitor|bot|demo|dashboard|report]")
+        print("Usage: python main.py [test|once|daemon|monitor|bot|demo|dashboard|report|backtest]")
         sys.exit(1)
 
     mode = sys.argv[1]
@@ -172,6 +172,11 @@ if __name__ == "__main__":
         os.environ.setdefault("STOCKWATCH_SKIP_REQUIRED_CONFIG", "1")
         from analysis.report import main as report_main
         raise SystemExit(report_main(sys.argv[2:]))
+
+    elif mode == "backtest":
+        os.environ.setdefault("STOCKWATCH_SKIP_REQUIRED_CONFIG", "1")
+        from scripts.backtest_strategy import main as backtest_main
+        raise SystemExit(backtest_main(sys.argv[2:]))
 
     else:
         print(f"Unknown mode: {mode}")

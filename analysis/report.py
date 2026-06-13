@@ -20,7 +20,10 @@ def _future_return(kline: list[dict], run_date: str, horizon: int) -> float | No
         return None
     start_idx = None
     for idx, row in enumerate(kline):
-        if str(row.get("trade_date", "")) >= run_date:
+        # Use the NEXT trading day's close as the entry, not the decision day's:
+        # midday/after-close runs are made before that day's close is final, so
+        # ">= run_date" would price the entry at an unavailable bar (look-ahead).
+        if str(row.get("trade_date", "")) > run_date:
             start_idx = idx
             break
     if start_idx is None or start_idx + horizon >= len(kline):

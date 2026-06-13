@@ -2140,6 +2140,19 @@ def _first(params: dict[str, list[str]], name: str, default: str = "") -> str:
     return values[0] if values else default
 
 
+def _safe_next(value: str) -> str:
+    """只允许站内相对路径跳转，防止 ?next=https://evil.com 这类开放重定向钓鱼。"""
+    if (
+        value
+        and value.startswith("/")
+        and not value.startswith("//")
+        and "://" not in value
+        and "\\" not in value
+    ):
+        return value
+    return "/"
+
+
 def _bool_param(params: dict[str, list[str]], name: str) -> str:
     return "true" if _first(params, name) == "true" else "false"
 
@@ -2388,7 +2401,7 @@ def make_handler(storage: Storage):
                 return
             if route == "/login":
                 params = parse_qs(parsed.query)
-                next_url = _first(params, "next", "/") or "/"
+                next_url = _safe_next(_first(params, "next", "/") or "/")
                 if not _web_auth_token():
                     self._redirect(next_url)
                     return
@@ -2440,7 +2453,7 @@ def make_handler(storage: Storage):
                 params, _ = _parse_form_data(self.headers, raw)
                 token = _web_auth_token()
                 supplied = _first(params, "token").strip()
-                next_url = _first(params, "next", "/") or "/"
+                next_url = _safe_next(_first(params, "next", "/") or "/")
                 if token and secrets.compare_digest(supplied, token):
                     self._redirect(next_url, {"Set-Cookie": f"{AUTH_COOKIE}={supplied}; Path=/; HttpOnly; SameSite=Lax"})
                     return

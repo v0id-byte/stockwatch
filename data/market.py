@@ -64,7 +64,7 @@ class MarketData:
                         "open": float(fields[5]) if fields[5] else 0,
                         "high": float(fields[33]) if fields[33] else 0,
                         "low": float(fields[34]) if fields[34] else 0,
-                        "close": float(fields[3]),
+                        "close": _to_float(fields[3]),
                         "volume": float(fields[37]) if fields[37] else 0,
                         "pct_change": float(fields[32]) if fields[32] else 0,
                         "quote_time": fields[30] if len(fields) > 30 else "",
@@ -75,6 +75,9 @@ class MarketData:
                     }
                 except (ValueError, IndexError):
                     continue
+            if len(result) < len(codes):
+                missing = [c for c in codes if c not in result]
+                logger.debug(f"腾讯行情缺失 {len(missing)} 只（解析失败或无数据）: {missing[:10]}")
             return result
         except Exception as e:
             logger.warning(f"腾讯实时报价失败: {e}")

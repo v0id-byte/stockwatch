@@ -38,14 +38,38 @@ class LgbmRanker:
             logger.warning(f"LightGBM 模型加载失败: {e}")
             self.model = None
 
-    def predict(self, factors_dict: dict) -> float | None:
-        if self.model is None:
-            return None
+    def _needs_rank_normalize(self) -> bool:
+        return self.meta.get("feature_normalization") == "cross_sectional_rank_pct_centered"
+
+    def predict_batch(self, factors_by_code: dict[str, dict]) -> dict[str, float | None]:
+        """Score a cross-section of stocks together.
+
+        Models trained with cross_sectional_rank normalization MUST be scored on
+        rank-normalized features (matching training); doing this per stock with raw
+        features — as the old code did — fed the model an out-of-distribution input.
+        With a single stock the ranking is undefined, so every feature collapses to
+        the neutral 0.0 and the caller's formatter notes it cannot be ranked.
+        """
+        if self.model is None or not factors_by_code:
+            return {code: None for code in factors_by_code}
         features = self.meta.get("features", [])
         if not features:
-            return None
-        x = [[float(factors_dict.get(name, 0.0) or 0.0) for name in features]]
-        return float(self.model.predict(x)[0])
+            return {code: None for code in factors_by_code}
+        codes = list(factors_by_code)
+        rows = [[float(factors_by_code[code].get(name, 0.0) or 0.0) for name in features] for code in codes]
+        if self._needs_rank_normalize():
+            import pandas as pd
+            frame = pd.DataFrame(rows, columns=features)
+            if len(frame) > 1:
+                frame = frame.rank(pct=True) - 0.5
+            else:
+                frame[:] = 0.0
+            rows = frame.to_numpy().tolist()
+        preds = self.model.predict(rows)
+        return {code: float(value) for code, value in zip(codes, preds)}
+
+    def predict(self, factors_dict: dict) -> float | None:
+        return self.predict_batch({"_": factors_dict}).get("_")
 
 
 def format_lgbm_context(scores_by_code: dict[str, float | None]) -> dict[str, str]:

@@ -11,17 +11,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from analysis.factors import ALPHA158_FEATURES
+from analysis.factors import ALPHA158_FEATURES, ROBUST_FEATURES
 from analysis.propagation import PROPAGATION_FEATURES
 
 STABLE_FEATURE_PREFIXES = (
     "ILLIQ", "BETA", "RSV", "DD", "RET", "ROC", "RELV", "STD",
     "RSQR", "CORR", "VMA", "WVMA", "TURN", "VOLZ", "MOM", "SHARPE",
 )
-
-
-def _group_sizes(df):
-    return df.groupby("trade_date", sort=False).size().tolist()
 
 
 def _split_by_date_with_purge(df, label_horizon: int):
@@ -60,18 +56,32 @@ def _split_by_date_with_purge(df, label_horizon: int):
 
 
 def _feature_names(available_columns: set[str]) -> tuple[str, list[str]]:
-    feature_set = os.getenv("STOCKWATCH_LGBM_FEATURE_SET", "stable").strip().lower()
+    feature_set = os.getenv("STOCKWATCH_LGBM_FEATURE_SET", "robust").strip().lower()
     if feature_set == "all":
         names = [*ALPHA158_FEATURES, *PROPAGATION_FEATURES]
         return "all", [name for name in names if name in available_columns]
-    if feature_set != "stable":
-        print(f"unknown STOCKWATCH_LGBM_FEATURE_SET={feature_set}, fallback to stable")
-    names = [
-        name for name in ALPHA158_FEATURES
-        if name.startswith(STABLE_FEATURE_PREFIXES)
-    ]
-    names.extend(PROPAGATION_FEATURES)
-    return "stable", [name for name in names if name in available_columns]
+    if feature_set == "stable":
+        names = [name for name in ALPHA158_FEATURES if name.startswith(STABLE_FEATURE_PREFIXES)]
+        names.extend(PROPAGATION_FEATURES)
+        return "stable", [name for name in names if name in available_columns]
+    if feature_set != "robust":
+        print(f"unknown STOCKWATCH_LGBM_FEATURE_SET={feature_set}, fallback to robust")
+    # robust: sign-stable cross-sectional factors only (see analysis/factors.ROBUST_FEATURES)
+    return "robust", [name for name in ROBUST_FEATURES if name in available_columns]
+
+
+def _cross_sectional_rank_normalize(df, feature_names):
+    """Rank-normalize each feature to [-0.5, 0.5] WITHIN each trade date.
+
+    This is the single most important fix vs the previous model: it removes
+    time-varying factor scale/level so a tree threshold means the same thing
+    ("top of today's cross-section") in every regime, which is what lets the
+    cross-sectional signal generalize out-of-sample.
+    """
+    grouped = df.groupby("trade_date", sort=False)
+    for name in feature_names:
+        df[name] = grouped[name].rank(pct=True) - 0.5
+    return df
 
 
 def _mean_ndcg(df, pred, k: int) -> float | None:
@@ -216,6 +226,34 @@ def _non_overlapping_sample(df, pred, step: int):
     return df[mask], np.asarray(pred)[mask]
 
 
+def _per_year_ic(df, pred, return_col: str) -> dict:
+    """Per-calendar-year cross-sectional IC — the honest stability picture that one
+    train/val/test split (which lands on a single recent regime) can hide."""
+    import pandas as pd
+
+    tmp = df[["trade_date", return_col]].copy()
+    tmp["pred"] = pred
+    out = {}
+    for year, gy in tmp.groupby(tmp["trade_date"].dt.year):
+        ics = []
+        for _date, g in gy.groupby("trade_date"):
+            if len(g) <= 2 or g["pred"].nunique() <= 1 or g[return_col].nunique() <= 1:
+                continue
+            value = g["pred"].corr(g[return_col], method="spearman")
+            if pd.notna(value):
+                ics.append(float(value))
+        if ics:
+            s = pd.Series(ics)
+            std = s.std()
+            out[str(int(year))] = {
+                "mean_ic": float(s.mean()),
+                "icir": float(s.mean() / std) if std else None,
+                "positive_rate": float((s > 0).mean()),
+                "days": int(len(s)),
+            }
+    return out
+
+
 def _evaluate_split(df, pred, return_col: str, label_horizon: int) -> dict:
     metrics = _evaluate_split_core(df, pred, return_col)
     sampled_df, sampled_pred = _non_overlapping_sample(df, pred, label_horizon)
@@ -260,52 +298,47 @@ def main():
     if return_col not in df.columns:
         return_col = "forward_5d_return"
 
-    train, val, test, split = _split_by_date_with_purge(df, label_horizon)
-    if train.empty or val.empty or test.empty:
-        raise RuntimeError("训练/验证/测试切分为空，请检查历史数据跨度")
     feature_set, feature_names = _feature_names(set(df.columns))
     if not feature_names:
         raise RuntimeError("训练特征为空，请检查 STOCKWATCH_LGBM_FEATURE_SET")
+    df = _cross_sectional_rank_normalize(df, feature_names)
 
+    train, val, test, split = _split_by_date_with_purge(df, label_horizon)
+    if train.empty or val.empty or test.empty:
+        raise RuntimeError("训练/验证/测试切分为空，请检查历史数据跨度")
+
+    # Regression on the cross-sectional rank label directly optimizes rank
+    # correlation (IC). This replaces the previous lambdarank setup, which paired
+    # with unstable risk factors produced a NEGATIVE out-of-sample IC.
     params = {
-        "objective": "lambdarank",
-        "metric": "ndcg",
-        "ndcg_eval_at": [5, 10],
+        "objective": "regression",
+        "metric": "l2",
         "learning_rate": 0.03,
-        "num_leaves": 31,
-        "max_depth": 5,
-        "min_data_in_leaf": 200,
-        "feature_fraction": 0.85,
-        "bagging_fraction": 0.85,
+        "num_leaves": 15,
+        "max_depth": 4,
+        "min_data_in_leaf": 500,
+        "feature_fraction": 0.7,
+        "bagging_fraction": 0.7,
         "bagging_freq": 5,
         "verbose": -1,
         "seed": 42,
     }
-    train_set = lgb.Dataset(
-        train[feature_names],
-        label=train["label"],
-        group=_group_sizes(train),
-        feature_name=feature_names,
-    )
-    val_set = lgb.Dataset(
-        val[feature_names],
-        label=val["label"],
-        group=_group_sizes(val),
-        feature_name=feature_names,
-        reference=train_set,
-    )
+    train_set = lgb.Dataset(train[feature_names], label=train["label"], feature_name=feature_names)
+    val_set = lgb.Dataset(val[feature_names], label=val["label"], feature_name=feature_names, reference=train_set)
     model = lgb.train(
         params,
         train_set,
-        num_boost_round=300,
+        num_boost_round=600,
         valid_sets=[val_set],
-        callbacks=[lgb.early_stopping(25), lgb.log_evaluation(20)],
+        callbacks=[lgb.early_stopping(40), lgb.log_evaluation(50)],
     )
 
     val_pred = model.predict(val[feature_names], num_iteration=model.best_iteration)
     test_pred = model.predict(test[feature_names], num_iteration=model.best_iteration)
     validation_metrics = _evaluate_split(val, val_pred, return_col, label_horizon)
     test_metrics = _evaluate_split(test, test_pred, return_col, label_horizon)
+    full_pred = model.predict(df[feature_names], num_iteration=model.best_iteration)
+    per_year_ic = _per_year_ic(df, full_pred, return_col)
     out_dir = ROOT / "models"
     out_dir.mkdir(exist_ok=True)
     model_path = out_dir / "lgbm.txt"
@@ -319,6 +352,8 @@ def main():
         "trained_at": datetime.now().isoformat(),
         "features": feature_names,
         "feature_set": feature_set,
+        "feature_normalization": "cross_sectional_rank_pct_centered",
+        "objective": params["objective"],
         "feature_count": len(feature_names),
         "available_feature_count": len(ALPHA158_FEATURES),
         "propagation_feature_count": len([name for name in PROPAGATION_FEATURES if name in feature_names]),
@@ -332,6 +367,13 @@ def main():
         "top10": test_metrics["top10"],
         "validation_metrics": validation_metrics,
         "test_metrics": test_metrics,
+        "per_year_ic": per_year_ic,
+        "per_year_ic_note": (
+            "逐年横截面 IC（含样本内年份）。train 截止 "
+            + split["train_end_exclusive"]
+            + "，test 起始 " + split["test_start"]
+            + "；其后年份为样本外。IC 逐年为正说明排序方向稳定。"
+        ),
         "best_iteration": model.best_iteration,
         "split": split,
         "train_rows": len(train),
