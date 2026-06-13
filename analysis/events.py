@@ -125,52 +125,86 @@ def _buybacks():
     return df.dropna(subset=["code", "adate"])[lambda d: d["adate"] >= cutoff]
 
 
-def collect_events(codes: list[str]) -> dict[str, list[dict]]:
-    """Return {code: [event, ...]}. Each event: {type, date, level, note}."""
+def _all_events(relevant: set[str]) -> dict[str, list[dict]]:
+    """Build {code: [event]} for every code in `relevant` from the bulk sources."""
     import pandas as pd
-    wanted = {str(c).zfill(6) for c in codes}
-    out: dict[str, list[dict]] = {c: [] for c in wanted}
+    out: dict[str, list[dict]] = {}
     today = pd.Timestamp(_today())
+
+    def add(code, ev):
+        out.setdefault(code, []).append(ev)
 
     lk = _cache_for("lockup", _lockups)
     if lk is not None:
-        for r in lk[lk["code"].isin(wanted)].itertuples():
+        for r in lk[lk["code"].isin(relevant)].itertuples():
             upcoming = r.rdate >= today
             big = pd.notna(r.pct) and r.pct >= LOCKUP_WARN_PCT
             when = "未来" if upcoming else "近期"
-            level = "warning" if (upcoming and big) else "info"
-            out[r.code].append({
-                "type": "解禁", "date": r.rdate.date().isoformat(), "level": level,
-                "note": f"{when}{r.rdate.date()}解禁，占流通约{_fmt_pct(r.pct)}（历史上解禁前后波动加大，非涨跌预测）",
-            })
+            add(r.code, {"type": "解禁", "date": r.rdate.date().isoformat(),
+                         "level": "warning" if (upcoming and big) else "info",
+                         "note": f"{when}{r.rdate.date()}解禁，占流通约{_fmt_pct(r.pct)}（历史上解禁前后波动加大，非涨跌预测）"})
 
     pa = _cache_for("preannounce", _preannounce)
     if pa is not None:
-        for r in pa[pa["code"].isin(wanted)].itertuples():
+        for r in pa[pa["code"].isin(relevant)].itertuples():
             neg = r.etype in _NEG_YJYG
-            level = "warning" if neg else "info"
             tail = "属风险信号" if neg else "公开反应多已被price-in"
-            out[r.code].append({
-                "type": "业绩预告", "date": r.adate.date().isoformat(), "level": level,
-                "note": f"业绩预告：{r.etype}（{r.adate.date()}，{tail}）",
-            })
+            add(r.code, {"type": "业绩预告", "date": r.adate.date().isoformat(),
+                         "level": "warning" if neg else "info",
+                         "note": f"业绩预告：{r.etype}（{r.adate.date()}，{tail}）"})
 
     ins = _cache_for("insider", _insider)
     if ins is not None and len(ins):
-        agg = ins[ins["code"].isin(wanted)].groupby("code")["shares"].sum()
-        for code, net in agg.items():
+        for code, net in ins[ins["code"].isin(relevant)].groupby("code")["shares"].sum().items():
             if net > 0:
-                out[code].append({"type": "增持", "date": "", "level": "info",
-                                  "note": "近期董监高/股东净增持（短期略偏积极，影响有限）"})
+                add(code, {"type": "增持", "date": "", "level": "info", "note": "近期董监高/股东净增持（短期略偏积极，影响有限）"})
             elif net < 0:
-                out[code].append({"type": "减持", "date": "", "level": "warning",
-                                  "note": "近期董监高/股东净减持（资金面偏谨慎）"})
+                add(code, {"type": "减持", "date": "", "level": "warning", "note": "近期董监高/股东净减持（资金面偏谨慎）"})
 
     bb = _cache_for("buyback", _buybacks)
     if bb is not None:
-        for code in bb[bb["code"].isin(wanted)]["code"].unique():
-            out[code].append({"type": "回购", "date": "", "level": "info",
-                              "note": "近期发布回购方案（管理层信心信号）"})
+        for code in bb[bb["code"].isin(relevant)]["code"].unique():
+            add(code, {"type": "回购", "date": "", "level": "info", "note": "近期发布回购方案（管理层信心信号）"})
+    return out
+
+
+def collect_events(codes: list[str], sector_map: dict | None = None) -> dict[str, list[dict]]:
+    """Return {code: [event, ...]}. Each event: {type, date, level, note}.
+
+    With sector_map ({code: sector}), also attach 连带 (sector-propagation) notes:
+    same-sector peers with a notable event. The A-share sympathy effect is only ~+0.04%
+    next-day excess (see scripts/sympathy study) so these are CONTEXT, not predictions.
+    """
+    wanted = {str(c).zfill(6) for c in codes}
+    relevant = set(wanted)
+    sector_to_wanted: dict[str, list[str]] = {}
+    if sector_map:
+        sector_map = {str(k).zfill(6): v for k, v in sector_map.items()}
+        for c in wanted:
+            s = sector_map.get(c)
+            if s and s != "未知":
+                sector_to_wanted.setdefault(s, []).append(c)
+        relevant |= {p for p, s in sector_map.items() if s in sector_to_wanted}
+
+    raw = _all_events(relevant)
+    out: dict[str, list[dict]] = {c: list(raw.get(c, [])) for c in wanted}
+
+    # 连带: a peer in the same sector has a notable event
+    if sector_to_wanted:
+        rank = {"warning": 0, "info": 1}
+        for peer, evs in raw.items():
+            sector = sector_map.get(peer)
+            if peer in wanted or not sector or sector not in sector_to_wanted:
+                continue
+            top = sorted(evs, key=lambda e: rank.get(e.get("level"), 2))[0]
+            for w in sector_to_wanted[sector]:
+                links = [e for e in out[w] if e["type"] == "连带"]
+                if len(links) >= 2:  # cap to avoid spam
+                    continue
+                out[w].append({
+                    "type": "连带", "date": top.get("date", ""), "level": "info",
+                    "note": f"同板块({sector}) {peer} 出现「{top['type']}」（板块情绪参考，A股补涨效应历史上很弱、非预测）",
+                })
     return out
 
 

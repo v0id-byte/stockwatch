@@ -535,10 +535,13 @@ STOCKWATCH_INDEX_SYMBOLS=000300,000905,000852,932000 python scripts/bootstrap_hi
 | 业绩预告（预增/预减/首亏…） | 21,180 | 利好→平/跌、利空→涨，方向命中率 39–47%（**反转/已 price-in**） |
 | 解禁（按规模/类型） | 10,445 | 规模与超额相关性 **−0.003**，无供给压制效应 |
 | 增持（董监高/股东买入） | 19,530 | 仅 5 日 +0.8%（胜率 55%）的微弱短脉冲，20 日中位转负，信息比 0.12 |
+| 板块连带（龙头涨≥7%→同板块次日） | 21,146 | 同板块其他成分次日超额仅比基线高 **+0.04%**，胜率≈50%，**有方向、无幅度** |
 
 **结论：A 股公开事件没有可交易的稳定超额**——公告日之前就被 price-in，剩下的是反转和噪声。散户拿不到事前预判、相对一致预期的 surprise、或盘中低延迟，所以**不把事件并入选股因子**。
 
 但事件对**风险/情境**有价值，所以做了一个只提示、不预测的事件层（`ENABLE_EVENTS=true`，`analysis/events.py`）：拉取**解禁日历、业绩预告、增减持、回购**等结构化事件，给自选股/持仓打风险标记（如"下周解禁占流通X%，历史波动加大""刚发首亏""股东减持"），作为消息面喂给日常分析（`core/runner.py`）和深度问答（`bot/research.py`）。所有措辞都是**风险提示，不是买卖指令、不是涨跌预测**。
+
+**事件连带（板块传导提示）**：同时开启 `ENABLE_SECTOR=true` 后，事件层会用缓存的板块映射做连带——当**同板块的其他股票**出现事件（如解禁/减持/业绩预告）时，给你的自选股加一条"同板块(X) 某票 出现〔事件〕"的情绪参考。**注意**：上表实测同板块补涨次日超额仅 +0.04%、胜率≈50%，所以这是**板块情绪情境，不是补涨预测**，措辞里也写明了。已有的 `analysis/propagation.py` 则提供另一维度的价格 lead-lag 连带。
 
 `build_training_set.py` 默认会生成关联补涨传播特征：当某只股票成为放量领涨股时，系统用过去窗口估计“领涨股前一日收益 → 候选股当日收益”的滞后相关，并把领涨幅度、放量、相关强度、候选未反应程度和传播分写入训练集。这个过程只使用当日及以前可见数据；如需关闭：
 
@@ -1005,6 +1008,7 @@ ENABLE_LGBM=false
 ENABLE_PROPAGATION=false
 ENABLE_REGIME=false
 ENABLE_SECTOR=false
+ENABLE_EVENTS=false
 ```
 
 Suggested enablement order:
@@ -1012,6 +1016,17 @@ Suggested enablement order:
 ```text
 ENABLE_REGIME -> ENABLE_SECTOR -> ENABLE_ALPHA158 -> ENABLE_PROPAGATION -> ENABLE_CALIBRATION -> ENABLE_LGBM
 ```
+
+### Quant rebuild & the message-driven event layer (validated, honest)
+
+Every recent direction was validated on local A-share history (2022–2026) before keeping it. What survived a clean out-of-sample check:
+
+- **Cross-sectional model rebuilt** — sign-stable factors (reversal + oversold + low-turnover), per-day cross-sectional rank-normalization, regression on rank. Rank IC is now **positive every year** (vs the old model's −0.024 out-of-sample). Reproduce with `python main.py backtest`.
+- **Asymmetric bull/bear models** (`MARKET_REGIME=auto|bull|bear`) — a bear-specialized model lifts out-of-sample bear IC +0.076→+0.096; a separately-trained bull model was *worse* OOS, so bull/normal regimes use the universal model.
+- **Drawdown** — institutional risk tricks (vol-targeting, beta/sector neutralization, quality screens) gave ~no drawdown reduction; the only lever for a long-only retail book is cutting exposure in risk-off regimes (`backtest --bear-exposure 0.5`), a risk/return dial, not a free lunch.
+- **Rejected after validation (kept honest in docs):** fundamental factors (weak on A-shares), a bigger micro-cap universe (inflates backtest return via illiquidity, no drawdown help), and **event-driven alpha** — a PIT event study found public events (earnings preannouncements, lockup expiries, insider buying, sector sympathy) have **no clean tradeable post-event return** (priced in by announcement).
+
+**Event layer (`ENABLE_EVENTS=true`, `analysis/events.py`)** — because events still matter for *risk/context*, not prediction. It pulls structured events (lockup calendar, earnings preannouncements, insider trades, buybacks), flags each as a plain-language risk/info note, and feeds them into the daily analysis and stock Q&A. With `ENABLE_SECTOR=true` it also adds **sector-propagation (连带)** notes — same-sector peers with events — explicitly labelled as sentiment context (the measured sympathy effect is only ~+0.04% next-day, so it is never presented as a price prediction). Nothing here is a buy/sell instruction or a return forecast.
 
 For LightGBM offline training:
 

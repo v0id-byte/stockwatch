@@ -435,6 +435,15 @@ class Storage:
             ).fetchall()
         return {code: sector for code, sector in rows}
 
+    def get_all_stock_sectors(self, max_age_days: int = 45) -> dict[str, str]:
+        """Whole cached code->sector map (used for event sector-propagation)."""
+        cutoff = (datetime.now() - timedelta(days=max_age_days)).isoformat()
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT code, sector FROM stock_sector_map WHERE updated_at>=?", [cutoff]
+            ).fetchall()
+        return {code: sector for code, sector in rows}
+
     def upsert_stock_sectors(self, mapping: dict[str, str]):
         if not mapping:
             return

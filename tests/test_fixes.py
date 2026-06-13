@@ -143,3 +143,21 @@ class TestEventLayer:
         assert "首亏" in _NEG_YJYG and "续亏" in _NEG_YJYG
         assert "预增" in _POS_YJYG
         assert not (_POS_YJYG & _NEG_YJYG)  # no overlap
+
+    def test_sector_propagation_links_same_sector_peers(self, monkeypatch):
+        import analysis.events as events
+        # peer B has an event and shares sector X with watched A; C is a different sector
+        monkeypatch.setattr(events, "_all_events", lambda relevant: {
+            "000002": [{"type": "减持", "date": "", "level": "warning", "note": "股东减持"}],
+            "000003": [{"type": "解禁", "date": "", "level": "info", "note": "解禁"}],
+        })
+        out = events.collect_events(["000001"], sector_map={"000001": "X", "000002": "X", "000003": "Y"})
+        links = [e for e in out["000001"] if e["type"] == "连带"]
+        assert len(links) == 1 and "000002" in links[0]["note"]      # same-sector peer linked
+        assert all("000003" not in e["note"] for e in out["000001"])  # other sector not linked
+
+    def test_no_propagation_without_sector_map(self, monkeypatch):
+        import analysis.events as events
+        monkeypatch.setattr(events, "_all_events", lambda relevant: {"000001": []})
+        out = events.collect_events(["000001"])  # no sector_map
+        assert out["000001"] == []

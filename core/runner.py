@@ -367,7 +367,10 @@ def once():
     if cfg.enable_events and decisions:
         try:
             from analysis.events import collect_events, format_events_context
-            events_by_code = collect_events([d["code"] for d in decisions])
+            # sector map enables 事件连带 (same-sector peers with events); cached from
+            # the sector module, empty -> propagation just doesn't fire (graceful)
+            sector_map = storage.get_all_stock_sectors() if cfg.enable_sector else None
+            events_by_code = collect_events([d["code"] for d in decisions], sector_map=sector_map)
             for d in decisions:
                 ctx = format_events_context(events_by_code.get(d["code"], []))
                 if ctx:
