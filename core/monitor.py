@@ -20,7 +20,9 @@ def _is_intraday_monitor_time(now: datetime | None = None) -> bool:
     return (9 * 60 + 25 <= minutes <= 11 * 60 + 30) or (13 * 60 <= minutes <= 15 * 60)
 
 
-def _send_alert_card(feishu: FeishuClient, chat_id: str, card: dict) -> bool:
+def _send_alert_card(feishu: FeishuClient | None, chat_id: str, card: dict) -> bool:
+    if feishu is None:
+        return True
     if chat_id:
         return feishu.send_card_to(chat_id, card, "chat_id")
     return feishu.send_message(card)
@@ -59,7 +61,7 @@ def _major_news_by_title(title: str) -> bool:
     return any(word in str(title or "") for word in keywords)
 
 
-def _monitor_price_alerts(storage: Storage, market: MarketData, feishu: FeishuClient):
+def _monitor_price_alerts(storage: Storage, market: MarketData, feishu: FeishuClient | None):
     alerts = storage.get_active_price_alerts()
     if not alerts:
         return
@@ -180,12 +182,11 @@ def _monitor_major_news(storage: Storage, market: MarketData, feishu: FeishuClie
 def monitor_once(check_news: bool = False):
     """盘中轻量监控：盯关键价 + 可选重大新闻扫描。"""
     cfg = get_config()
-    if cfg.notify_channel != "feishu":
-        logger.info("NOTIFY_CHANNEL=web，盘中轻量监控仅在 Web 控制台查看，跳过飞书推送")
-        return
     storage = Storage()
     market = MarketData()
-    feishu = FeishuClient()
+    feishu = FeishuClient() if cfg.notify_channel == "feishu" else None
+    if feishu is None:
+        logger.info("NOTIFY_CHANNEL=web，盘中轻量监控会记录触价状态并跳过飞书推送")
     _monitor_price_alerts(storage, market, feishu)
-    if check_news:
+    if check_news and feishu:
         _monitor_major_news(storage, market, feishu)

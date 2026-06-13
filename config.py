@@ -27,8 +27,9 @@ class Config:
     def load(self, env_path: str | None = None) -> "Config":
         if self._loaded:
             return self
-        if env_path:
-            load_dotenv(env_path)
+        configured_env_path = env_path or os.getenv("STOCKWATCH_ENV_PATH")
+        if configured_env_path:
+            load_dotenv(configured_env_path, override=True)
         else:
             load_dotenv()
         self._loaded = True

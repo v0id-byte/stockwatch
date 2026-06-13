@@ -161,3 +161,75 @@ class TestEventLayer:
         monkeypatch.setattr(events, "_all_events", lambda relevant: {"000001": []})
         out = events.collect_events(["000001"])  # no sector_map
         assert out["000001"] == []
+
+
+class TestSecondReviewFixes:
+    def test_lgbm_uses_model_specific_meta_path(self, tmp_path, monkeypatch):
+        import json
+        import types
+        import sys
+        from analysis.lgbm import LgbmRanker
+
+        class Booster:
+            def __init__(self, model_file):
+                self.model_file = model_file
+            def feature_name(self):
+                return ["fallback"]
+
+        monkeypatch.setitem(sys.modules, "lightgbm", types.SimpleNamespace(Booster=Booster))
+        (tmp_path / "lgbm.txt").write_text("model")
+        (tmp_path / "lgbm_bear.txt").write_text("model")
+        (tmp_path / "lgbm_meta.json").write_text(json.dumps({"features": ["universal"]}))
+        (tmp_path / "lgbm_bear_meta.json").write_text(json.dumps({"features": ["bear"]}))
+
+        ranker = LgbmRanker(tmp_path / "lgbm_bear.txt")
+        assert ranker.meta["features"] == ["bear"]
+
+    def test_backtest_benchmark_uses_hold_horizon(self, tmp_path):
+        import pandas as pd
+        from scripts.backtest_strategy import _load
+
+        history = tmp_path
+        train = pd.DataFrame({
+            "trade_date": ["2024-01-01", "2024-01-02"],
+            "code": ["000001", "000001"],
+            "forward_5d_return": [0.1, 0.2],
+        })
+        train.to_parquet(history / "training_set.parquet", index=False)
+        market = pd.DataFrame({
+            "trade_date": pd.date_range("2024-01-01", periods=10).strftime("%Y-%m-%d"),
+            "close": list(range(10, 20)),
+        })
+        market.to_parquet(history / "market_sh000300.parquet", index=False)
+
+        _, _, csi_fwd = _load(history, "forward_5d_return", 5)
+        assert csi_fwd[pd.Timestamp("2024-01-01")] == 0.5
+
+    def test_dashboard_defaults_and_factor_updates(self, monkeypatch):
+        import dashboard
+        assert dashboard.DEFAULT_SETTINGS["NOTIFY_CHANNEL"] == "web"
+        updates = dashboard._updates_for_route("/settings/factors", {
+            "market_regime": ["bear"],
+            "enable_propagation": ["true"],
+            "enable_events": ["true"],
+        })
+        assert updates["MARKET_REGIME"] == "bear"
+        assert updates["ENABLE_PROPAGATION"] == "true"
+        assert updates["ENABLE_EVENTS"] == "true"
+
+    def test_market_quote_fills_tencent_missing_with_akshare(self, monkeypatch):
+        from data.market import MarketData
+        monkeypatch.setattr(MarketData, "_get_realtime_quote_tencent", staticmethod(lambda codes: {"600519": {"name": "A"}}))
+        monkeypatch.setattr(MarketData, "_get_realtime_quote_akshare", staticmethod(lambda codes: {code: {"name": "B"} for code in codes}))
+        result = MarketData.get_realtime_quote(["600519", "430047"])
+        assert set(result) == {"600519", "430047"}
+
+    def test_config_loads_stockwatch_env_path_with_override(self, tmp_path, monkeypatch):
+        from config import Config
+        env_path = tmp_path / ".env"
+        env_path.write_text("NOTIFY_CHANNEL=web\n")
+        monkeypatch.setenv("STOCKWATCH_ENV_PATH", str(env_path))
+        monkeypatch.setenv("NOTIFY_CHANNEL", "feishu")
+        Config._instance = None
+        cfg = Config().load()
+        assert cfg.notify_channel == "web"

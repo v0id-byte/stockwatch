@@ -28,15 +28,16 @@ class MarketData:
         if not codes:
             return {}
         result = MarketData._get_realtime_quote_tencent(codes)
-        if not result:
-            logger.warning("腾讯行情接口无响应，切换 AKShare 备用源")
-            result = MarketData._get_realtime_quote_akshare(codes)
+        missing = [code for code in codes if code not in result]
+        if missing:
+            logger.warning(f"腾讯行情缺失 {len(missing)} 只，切换 AKShare 备用源补齐")
+            result.update(MarketData._get_realtime_quote_akshare(missing))
         return result
 
     @staticmethod
     def _get_realtime_quote_tencent(codes: list[str]) -> dict[str, dict]:
         code_str = ','.join([
-            f"sh{c}" if c.startswith(('6', '5')) else f"sz{c}"
+            f"sh{c}" if c.startswith(('6', '5')) else f"bj{c}" if c.startswith(('4', '8')) else f"sz{c}"
             for c in codes
         ])
         try:

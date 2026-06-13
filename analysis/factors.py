@@ -153,22 +153,22 @@ def compute_alpha158_frame(kline_df: pd.DataFrame, market_df: pd.DataFrame | Non
     market_ret = _market_return(market_df, df.index)
     log_volume = np.log(df["volume"].replace(0, np.nan))
 
-    factors = pd.DataFrame(index=df.index)
     vwap = (amount / df["volume"].replace(0, np.nan)).where(amount > 0, (high + low + close) / 3)
-    factors["OPEN0"] = df["open"] / close
-    factors["HIGH0"] = high / close
-    factors["LOW0"] = low / close
-    factors["VWAP0"] = vwap / close
-
-    factors["KMID"] = (close - open_) / open_
-    factors["KLEN"] = (high - low) / open_
-    factors["KMID2"] = (close - open_) / (k_range + eps)
-    factors["KUP"] = (high - np.maximum(open_, close)) / open_
-    factors["KUP2"] = (high - np.maximum(open_, close)) / (k_range + eps)
-    factors["KLOW"] = (np.minimum(open_, close) - low) / open_
-    factors["KLOW2"] = (np.minimum(open_, close) - low) / (k_range + eps)
-    factors["KSFT"] = (2 * close - high - low) / open_
-    factors["KSFT2"] = (2 * close - high - low) / (k_range + eps)
+    factor_data = {
+        "OPEN0": df["open"] / close,
+        "HIGH0": high / close,
+        "LOW0": low / close,
+        "VWAP0": vwap / close,
+        "KMID": (close - open_) / open_,
+        "KLEN": (high - low) / open_,
+        "KMID2": (close - open_) / (k_range + eps),
+        "KUP": (high - np.maximum(open_, close)) / open_,
+        "KUP2": (high - np.maximum(open_, close)) / (k_range + eps),
+        "KLOW": (np.minimum(open_, close) - low) / open_,
+        "KLOW2": (np.minimum(open_, close) - low) / (k_range + eps),
+        "KSFT": (2 * close - high - low) / open_,
+        "KSFT2": (2 * close - high - low) / (k_range + eps),
+    }
 
     pos_ret = ret.clip(lower=0)
     neg_ret = (-ret.clip(upper=0))
@@ -190,49 +190,59 @@ def compute_alpha158_frame(kline_df: pd.DataFrame, market_df: pd.DataFrame | Non
         down_days = (ret < 0).rolling(window).sum()
         volume_mean = df["volume"].rolling(window).mean()
 
-        factors[f"ROC{window}"] = close.shift(window) / close
-        factors[f"MA{window}"] = close.rolling(window).mean() / close
-        factors[f"STD{window}"] = close.rolling(window).std() / close
-        factors[f"BETA{window}"] = beta
-        factors[f"RSQR{window}"] = corr.pow(2)
-        factors[f"RESI{window}"] = (ret - beta * market_ret).rolling(window).std()
-        factors[f"MAX{window}"] = high.rolling(window).max() / close
-        factors[f"MIN{window}"] = low.rolling(window).min() / close
-        factors[f"QTLU{window}"] = close.rolling(window).quantile(0.8) / close
-        factors[f"QTLD{window}"] = close.rolling(window).quantile(0.2) / close
-        factors[f"RANK{window}"] = _rolling_rank_last(close, window)
-        factors[f"RSV{window}"] = (close - min_close) / (max_close - min_close + eps)
-        factors[f"IMAX{window}"] = _rolling_argmax(high, window)
-        factors[f"IMIN{window}"] = _rolling_argmin(low, window)
-        factors[f"IMXD{window}"] = factors[f"IMAX{window}"] - factors[f"IMIN{window}"]
-        factors[f"CORR{window}"] = close.rolling(window).corr(log_volume)
-        factors[f"CORD{window}"] = close.diff().rolling(window).corr(log_volume.diff())
-        factors[f"CNTP{window}"] = (ret > 0).rolling(window).mean()
-        factors[f"CNTN{window}"] = (ret < 0).rolling(window).mean()
-        factors[f"CNTD{window}"] = factors[f"CNTP{window}"] - factors[f"CNTN{window}"]
-        factors[f"SUMP{window}"] = pos_ret.rolling(window).sum() / ret_denom
-        factors[f"SUMN{window}"] = neg_ret.rolling(window).sum() / ret_denom
-        factors[f"SUMD{window}"] = factors[f"SUMP{window}"] - factors[f"SUMN{window}"]
-        factors[f"VMA{window}"] = df["volume"].rolling(window).mean() / volume
-        factors[f"VSTD{window}"] = df["volume"].rolling(window).std() / volume
-        factors[f"WVMA{window}"] = value.rolling(window).std() / (value.rolling(window).mean() + eps)
-        factors[f"VSUMP{window}"] = vol_pos.rolling(window).sum() / vol_denom
-        factors[f"VSUMN{window}"] = vol_neg.rolling(window).sum() / vol_denom
-        factors[f"VSUMD{window}"] = factors[f"VSUMP{window}"] - factors[f"VSUMN{window}"]
-        factors[f"RET{window}"] = close / close.shift(window) - 1
-        factors[f"MOM{window}"] = ret_mean / (ret_std + eps)
-        factors[f"DD{window}"] = close / (max_close + eps) - 1
-        factors[f"UPR{window}"] = up_days / (down_days + eps)
-        factors[f"DNR{window}"] = down_days / window
-        factors[f"SHARPE{window}"] = ret_mean / (ret_std + eps) * np.sqrt(252)
-        factors[f"VOLZ{window}"] = (df["volume"] - volume_mean) / (df["volume"].rolling(window).std() + eps)
-        factors[f"TURN{window}"] = df["volume"] / (volume_mean + eps)
-        factors[f"AMTMA{window}"] = value.rolling(window).mean() / (value + eps)
-        factors[f"ILLIQ{window}"] = ret.abs().rolling(window).mean() / (value.rolling(window).mean() + eps)
-        factors[f"PVCHG{window}"] = ret.rolling(window).corr(df["volume"].pct_change())
-        factors[f"RELV{window}"] = (ret - market_ret).rolling(window).sum()
+        imax = _rolling_argmax(high, window)
+        imin = _rolling_argmin(low, window)
+        cntp = (ret > 0).rolling(window).mean()
+        cntn = (ret < 0).rolling(window).mean()
+        sump = pos_ret.rolling(window).sum() / ret_denom
+        sumn = neg_ret.rolling(window).sum() / ret_denom
+        vsump = vol_pos.rolling(window).sum() / vol_denom
+        vsumn = vol_neg.rolling(window).sum() / vol_denom
+        factor_data.update({
+            f"ROC{window}": close.shift(window) / close,
+            f"MA{window}": close.rolling(window).mean() / close,
+            f"STD{window}": close.rolling(window).std() / close,
+            f"BETA{window}": beta,
+            f"RSQR{window}": corr.pow(2),
+            f"RESI{window}": (ret - beta * market_ret).rolling(window).std(),
+            f"MAX{window}": high.rolling(window).max() / close,
+            f"MIN{window}": low.rolling(window).min() / close,
+            f"QTLU{window}": close.rolling(window).quantile(0.8) / close,
+            f"QTLD{window}": close.rolling(window).quantile(0.2) / close,
+            f"RANK{window}": _rolling_rank_last(close, window),
+            f"RSV{window}": (close - min_close) / (max_close - min_close + eps),
+            f"IMAX{window}": imax,
+            f"IMIN{window}": imin,
+            f"IMXD{window}": imax - imin,
+            f"CORR{window}": close.rolling(window).corr(log_volume),
+            f"CORD{window}": close.diff().rolling(window).corr(log_volume.diff()),
+            f"CNTP{window}": cntp,
+            f"CNTN{window}": cntn,
+            f"CNTD{window}": cntp - cntn,
+            f"SUMP{window}": sump,
+            f"SUMN{window}": sumn,
+            f"SUMD{window}": sump - sumn,
+            f"VMA{window}": df["volume"].rolling(window).mean() / volume,
+            f"VSTD{window}": df["volume"].rolling(window).std() / volume,
+            f"WVMA{window}": value.rolling(window).std() / (value.rolling(window).mean() + eps),
+            f"VSUMP{window}": vsump,
+            f"VSUMN{window}": vsumn,
+            f"VSUMD{window}": vsump - vsumn,
+            f"RET{window}": close / close.shift(window) - 1,
+            f"MOM{window}": ret_mean / (ret_std + eps),
+            f"DD{window}": close / (max_close + eps) - 1,
+            f"UPR{window}": up_days / (down_days + eps),
+            f"DNR{window}": down_days / window,
+            f"SHARPE{window}": ret_mean / (ret_std + eps) * np.sqrt(252),
+            f"VOLZ{window}": (df["volume"] - volume_mean) / (df["volume"].rolling(window).std() + eps),
+            f"TURN{window}": df["volume"] / (volume_mean + eps),
+            f"AMTMA{window}": value.rolling(window).mean() / (value + eps),
+            f"ILLIQ{window}": ret.abs().rolling(window).mean() / (value.rolling(window).mean() + eps),
+            f"PVCHG{window}": ret.rolling(window).corr(df["volume"].pct_change()),
+            f"RELV{window}": (ret - market_ret).rolling(window).sum(),
+        })
 
-    factors = factors.reindex(columns=ALPHA158_FEATURES)
+    factors = pd.DataFrame(factor_data, index=df.index).reindex(columns=ALPHA158_FEATURES)
     factors = factors.replace([np.inf, -np.inf], np.nan).fillna(0.0)
     if "trade_date" in df.columns:
         factors.insert(0, "trade_date", df["trade_date"].values)

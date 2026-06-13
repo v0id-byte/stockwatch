@@ -21,7 +21,7 @@ from utils.storage import Storage
 
 
 PROJECT_DIR = Path(__file__).resolve().parent
-ENV_PATH = PROJECT_DIR / ".env"
+ENV_PATH = Path(os.getenv("STOCKWATCH_ENV_PATH", PROJECT_DIR / ".env")).expanduser()
 CUSTOM_FACTORS_DIR = Path.home() / ".stockwatch" / "custom_factors"
 _ENV_ASSIGN_RE = re.compile(r"^(\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*=\s*)(.*?)(\r?\n)?$")
 WEB_USER_ID = "web-ui"
@@ -30,7 +30,7 @@ FEEDBACK_URL = "https://github.com/v0id-byte/stockwatch/issues"
 AUTH_COOKIE = "stockwatch_auth"
 
 DEFAULT_SETTINGS = {
-    "NOTIFY_CHANNEL": "feishu",
+    "NOTIFY_CHANNEL": "web",
     "LLM_PROVIDER": "openai",
     "LLM_API_KEY": "",
     "LLM_BASE_URL": "https://api.minimaxi.com/v1",
@@ -46,6 +46,9 @@ DEFAULT_SETTINGS = {
     "ENABLE_CALIBRATION": "false",
     "ENABLE_ALPHA158": "false",
     "ENABLE_LGBM": "false",
+    "MARKET_REGIME": "auto",
+    "ENABLE_PROPAGATION": "false",
+    "ENABLE_EVENTS": "false",
     "ENABLE_REGIME": "false",
     "ENABLE_SECTOR": "false",
     "FEISHU_APP_ID": "",
@@ -112,6 +115,28 @@ BUILTIN_FACTORS = [
         "source": "官方",
         "description": "离线训练横截面排序模型，线上只作为解释和排序辅助。",
         "data_requirements": "训练好的 LGBM 模型、Alpha 因子",
+        "status": "builtin",
+    },
+    {
+        "id": "propagation",
+        "env_key": "ENABLE_PROPAGATION",
+        "name": "关联补涨观察",
+        "category": "板块轮动",
+        "horizon": "1 日",
+        "source": "官方",
+        "description": "识别领涨股后，从本地历史库扩展滞后相关候选，只作为观察提示。",
+        "data_requirements": "本地个股历史 parquet",
+        "status": "builtin",
+    },
+    {
+        "id": "events",
+        "env_key": "ENABLE_EVENTS",
+        "name": "结构化事件层",
+        "category": "消息面",
+        "horizon": "风险/情境",
+        "source": "官方",
+        "description": "拉取解禁、业绩预告、增减持、回购等事件，作为风险上下文而非涨跌预测。",
+        "data_requirements": "公开事件数据接口",
         "status": "builtin",
     },
 ]
@@ -230,6 +255,7 @@ def save_settings(updates: dict[str, str]) -> None:
         next_lines.append("# ===== Web UI settings =====\n")
         for key in missing:
             next_lines.append(f"{key}={_serialize_env_value(cleaned[key])}\n")
+    ENV_PATH.parent.mkdir(parents=True, exist_ok=True)
     ENV_PATH.write_text("".join(next_lines), encoding="utf-8")
     for key, value in cleaned.items():
         os.environ[key] = value
@@ -1062,7 +1088,7 @@ def _onboarding_panel(data: dict, settings: dict[str, str]) -> str:
     watch_count = len(re.findall(r"\d{6}", settings.get("WATCHLIST", "")))
     base_url = settings.get("LLM_BASE_URL", "")
     model_ready = bool(settings.get("LLM_API_KEY")) or base_url.startswith(("http://127.0.0.1", "http://localhost"))
-    channel = settings.get("NOTIFY_CHANNEL", "feishu")
+    channel = settings.get("NOTIFY_CHANNEL", "web")
     channel_ready = channel == "web" or all([
         settings.get("FEISHU_APP_ID"),
         settings.get("FEISHU_APP_SECRET"),
@@ -2103,6 +2129,11 @@ def render_factor_settings(settings: dict[str, str], notice: str = "", filters: 
           <label class="option-row"><input type="checkbox" name="enable_alpha158" value="true"{_checked(settings.get('ENABLE_ALPHA158', 'false'))}>Alpha158 因子</label>
           <label class="option-row"><input type="checkbox" name="enable_calibration" value="true"{_checked(settings.get('ENABLE_CALIBRATION', 'false'))}>信号校准因子</label>
           <label class="option-row"><input type="checkbox" name="enable_lgbm" value="true"{_checked(settings.get('ENABLE_LGBM', 'false'))}>LightGBM 模型因子</label>
+          <label class="option-row"><input type="checkbox" name="enable_propagation" value="true"{_checked(settings.get('ENABLE_PROPAGATION', 'false'))}>关联补涨观察</label>
+          <label class="option-row"><input type="checkbox" name="enable_events" value="true"{_checked(settings.get('ENABLE_EVENTS', 'false'))}>结构化事件层</label>
+        </div>
+        <div class="form-grid">
+          {_field("市场状态", _select("market_regime", settings.get("MARKET_REGIME", "auto"), [("auto", "自动判定"), ("bull", "手动牛市"), ("bear", "手动熊市")]))}
         </div>
         {_save_button()}
       </form>
@@ -2186,9 +2217,9 @@ def _updates_for_route(route: str, params: dict[str, list[str]]) -> dict[str, st
             updates["LLM_API_KEY"] = api_key
         return updates
     if route == "/settings/channels":
-        channel = _first(params, "notify_channel", "feishu")
+        channel = _first(params, "notify_channel", "web")
         if channel not in {"feishu", "web"}:
-            channel = "feishu"
+            channel = "web"
         updates = {
             "NOTIFY_CHANNEL": channel,
             "FEISHU_APP_ID": _first(params, "feishu_app_id"),
@@ -2236,12 +2267,18 @@ def _updates_for_route(route: str, params: dict[str, list[str]]) -> dict[str, st
             style = "balanced"
         return {"AI_RESPONSE_STYLE": style}
     if route == "/settings/factors":
+        regime = _first(params, "market_regime", "auto")
+        if regime not in {"auto", "bull", "bear"}:
+            regime = "auto"
         return {
             "ENABLE_REGIME": _bool_param(params, "enable_regime"),
             "ENABLE_SECTOR": _bool_param(params, "enable_sector"),
             "ENABLE_ALPHA158": _bool_param(params, "enable_alpha158"),
             "ENABLE_CALIBRATION": _bool_param(params, "enable_calibration"),
             "ENABLE_LGBM": _bool_param(params, "enable_lgbm"),
+            "MARKET_REGIME": regime,
+            "ENABLE_PROPAGATION": _bool_param(params, "enable_propagation"),
+            "ENABLE_EVENTS": _bool_param(params, "enable_events"),
         }
     return {}
 

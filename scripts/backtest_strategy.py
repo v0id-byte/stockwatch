@@ -56,7 +56,7 @@ _COMPOSITE_SIGN = {
 }
 
 
-def _load(history_dir: Path, target: str):
+def _load(history_dir: Path, target: str, hold: int):
     import numpy as np
     import pandas as pd
     import pyarrow.parquet as pq
@@ -78,7 +78,7 @@ def _load(history_dir: Path, target: str):
         csi = pd.read_parquet(csi_path)[["trade_date", "close"]].copy()
         csi["trade_date"] = pd.to_datetime(csi["trade_date"])
         csi = csi.sort_values("trade_date").reset_index(drop=True)
-        csi["fwd"] = csi["close"].shift(-20) / csi["close"] - 1
+        csi["fwd"] = csi["close"].shift(-hold) / csi["close"] - 1
         csi_fwd = dict(zip(csi["trade_date"], csi["fwd"]))
         csi["bull"] = is_bull_trend(csi["close"]).to_numpy()
         df["bull"] = df["trade_date"].map(dict(zip(csi["trade_date"], csi["bull"])))
@@ -244,7 +244,7 @@ def main(argv=None):
     args = p.parse_args(argv)
 
     history_dir = Path(args.history_dir).expanduser()
-    df, feats, csi_fwd = _load(history_dir, args.target)
+    df, feats, csi_fwd = _load(history_dir, args.target, args.hold)
     df, desc = _score(df, feats, args.signal, Path(args.model_path).expanduser())
     print("信号: %s   |   特征数: %d   |   样本: %d 行, %s ~ %s" % (
         desc, len(feats), len(df), df["trade_date"].min().date(), df["trade_date"].max().date()))

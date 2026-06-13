@@ -181,7 +181,6 @@ def main():
             last_date = _read_last_date(pd, path)
             if last_date and last_date >= end:
                 return code, "skipped"
-            return code, "skipped"
         out, source = _download_one(ak, pd, code, start, end, _columns)
         if out is not None:
             out.to_parquet(path, index=False)

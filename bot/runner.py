@@ -57,7 +57,6 @@ def run_bot():
         if storage.is_bot_event_handled(event_id):
             logger.info(f"跳过重复飞书事件: {event_id}")
             return
-        storage.mark_bot_event_handled(event_id, message_id)
 
         try:
             if message.get("message_type") != "text":
@@ -92,8 +91,9 @@ def run_bot():
             logger.exception(f"处理飞书消息失败: {e}")
             card = render_text_card("处理失败", [str(e)], template="red")
 
-        if chat_id:
-            feishu.send_card_to(chat_id, card, "chat_id")
+        sent = feishu.send_card_to(chat_id, card, "chat_id") if chat_id else False
+        if sent:
+            storage.mark_bot_event_handled(event_id, message_id)
 
     event_handler = (
         lark.EventDispatcherHandler.builder(

@@ -694,14 +694,18 @@ def answer_stock_question(question: str, stock: StockRef, market: MarketData, st
 数据：
 {json.dumps(data_pack, ensure_ascii=False, indent=2)}
 """
-    client = get_llm_client()
-    answer = client.chat([
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt[:9000]},
-    ], temperature=0.2, max_tokens=max_tokens)
-    answer = client._strip_think(answer).strip()
-    if not answer:
-        raise RuntimeError("模型没有返回分析内容")
+    try:
+        client = get_llm_client()
+        answer = client.chat([
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt[:9000]},
+        ], temperature=0.2, max_tokens=max_tokens)
+        answer = client._strip_think(answer).strip()
+        if not answer:
+            raise RuntimeError("模型没有返回分析内容")
+    except Exception as e:
+        logger.warning(f"个股问答降级为规则快照 {stock.code}: {e}")
+        return format_stock_snapshot(question, stock, market, storage)
     source_notes = [
         "资料来源",
         _format_sources(announcements, "公告"),

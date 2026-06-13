@@ -27,9 +27,13 @@ class LgbmRanker:
             import lightgbm as lgb
 
             self.model = lgb.Booster(model_file=str(model_path))
-            meta_path = model_path.parent / "lgbm_meta.json"
+            meta_path = model_path.with_name(f"{model_path.stem}_meta.json")
+            fallback_meta_path = model_path.parent / "lgbm_meta.json"
             if meta_path.exists():
                 with open(meta_path, "r") as f:
+                    self.meta = json.load(f)
+            elif fallback_meta_path.exists():
+                with open(fallback_meta_path, "r") as f:
                     self.meta = json.load(f)
             else:
                 self.meta = {"features": self.model.feature_name()}

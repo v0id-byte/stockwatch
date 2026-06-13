@@ -383,6 +383,7 @@ def once():
     all_alert_results = []
     run_results = []
     final_decisions = []
+    tracked_notify_ids_by_code = {}
 
     for d in decisions:
         decision = engine.decide_one(
@@ -403,7 +404,7 @@ def once():
         if tracked_reason:
             decision["one_liner"] = tracked_reason[:50]
             decision["_will_push"] = True
-            storage.mark_position_notified(tracked_by_code[d["code"]]["id"])
+            tracked_notify_ids_by_code[d["code"]] = tracked_by_code[d["code"]]["id"]
         if decision.get("_will_push"):
             level = _decision_alert_level(decision)
             decision["_alert_level"] = level
@@ -431,11 +432,14 @@ def once():
                 push_status = "成功" if push_ok else "失败"
                 for d in run_results:
                     storage.mark_decision_pushed(run_id, d["code"], push_ok)
-                    if not push_ok:
-                        break
             else:
                 push_ok = True
                 push_status = "已写入 Web 控制台"
+            if push_ok:
+                for d in run_results:
+                    position_id = tracked_notify_ids_by_code.get(d["code"])
+                    if position_id:
+                        storage.mark_position_notified(position_id)
         else:
             push_status = "无可展示信号"
     if feishu and not run_results:

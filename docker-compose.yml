@@ -2,6 +2,8 @@ services:
   stockwatch:
     build: .
     container_name: stockwatch
+    environment:
+      STOCKWATCH_ENV_PATH: /root/.stockwatch/.env
     env_file:
       - .env
     volumes:
@@ -14,6 +16,7 @@ services:
     container_name: stockwatch-dashboard
     environment:
       STOCKWATCH_SKIP_REQUIRED_CONFIG: "1"
+      STOCKWATCH_ENV_PATH: /root/.stockwatch/.env
     env_file:
       - .env
     volumes:
@@ -28,6 +31,8 @@ services:
     container_name: stockwatch-bot
     profiles:
       - bot
+    environment:
+      STOCKWATCH_ENV_PATH: /root/.stockwatch/.env
     env_file:
       - .env
     volumes:
