@@ -6,6 +6,29 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("STOCKWATCH_SKIP_REQUIRED_CONFIG", "1")
 
 
+class TestFeishuMultiRecipient:
+    """FEISHU_RECEIVE_ID accepts a comma/semicolon/space list of recipients;
+    FEISHU_RECEIVE_ID_2 stays backward-compatible; order preserved, deduped."""
+
+    def test_comma_list(self, monkeypatch):
+        from config import Config
+        monkeypatch.setenv("FEISHU_RECEIVE_ID", "ou_aaa, ou_bbb;ou_ccc")
+        monkeypatch.delenv("FEISHU_RECEIVE_ID_2", raising=False)
+        assert Config().feishu_receive_ids == ["ou_aaa", "ou_bbb", "ou_ccc"]
+
+    def test_legacy_second_merged_and_deduped(self, monkeypatch):
+        from config import Config
+        monkeypatch.setenv("FEISHU_RECEIVE_ID", "ou_aaa,ou_bbb")
+        monkeypatch.setenv("FEISHU_RECEIVE_ID_2", "ou_bbb")  # duplicate -> dropped
+        assert Config().feishu_receive_ids == ["ou_aaa", "ou_bbb"]
+
+    def test_empty(self, monkeypatch):
+        from config import Config
+        monkeypatch.setenv("FEISHU_RECEIVE_ID", "")
+        monkeypatch.delenv("FEISHU_RECEIVE_ID_2", raising=False)
+        assert Config().feishu_receive_ids == []
+
+
 class TestReportNoLookahead:
     """analysis/report.py must price an entry from the NEXT trading day's close,
     not the (possibly intraday, not-yet-final) decision-day close."""

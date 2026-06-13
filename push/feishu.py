@@ -54,17 +54,17 @@ class FeishuClient:
             raise
 
     def send_message(self, content: dict) -> bool:
-        """发送卡片消息给所有接收人，content 是卡片 JSON"""
-        # 收集所有接收人
-        receivers = [self.cfg.feishu_receive_id]
-        if self.cfg.feishu_receive_id_2:
-            receivers.append(self.cfg.feishu_receive_id_2)
-
+        """发送卡片消息给所有接收人（支持多用户），content 是卡片 JSON。
+        接收人来自 cfg.feishu_receive_ids：FEISHU_RECEIVE_ID 可逗号分隔填多个，
+        外加兼容的 FEISHU_RECEIVE_ID_2。"""
+        receivers = self.cfg.feishu_receive_ids
+        if not receivers:
+            logger.warning("飞书未配置接收人（FEISHU_RECEIVE_ID 为空），跳过推送")
+            return False
         success = True
         for rid in receivers:
-            if self.send_card_to(rid, content, self.cfg.feishu_receive_id_type):
-                continue
-            success = False
+            if not self.send_card_to(rid, content, self.cfg.feishu_receive_id_type):
+                success = False
         return success
 
     def send_card_to(self, receive_id: str, content: dict, receive_id_type: str = "chat_id") -> bool:

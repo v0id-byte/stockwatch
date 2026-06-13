@@ -139,6 +139,25 @@ class Config:
         return os.getenv("FEISHU_RECEIVE_ID_2", "")
 
     @property
+    def feishu_receive_ids(self) -> list[str]:
+        """多用户推送：FEISHU_RECEIVE_ID 可填多个接收人，用逗号/分号/空格分隔，
+        例如 FEISHU_RECEIVE_ID=ou_aaa,ou_bbb,ou_ccc。所有接收人共用同一个
+        FEISHU_RECEIVE_ID_TYPE（默认 open_id），所以要么都是 open_id、要么都是
+        user_id/email。旧的 FEISHU_RECEIVE_ID_2 仍然兼容，会自动并入列表。"""
+        import re
+
+        ids = [x for x in re.split(r"[,;\s]+", os.getenv("FEISHU_RECEIVE_ID", "")) if x]
+        second = os.getenv("FEISHU_RECEIVE_ID_2", "").strip()
+        if second:
+            ids.append(second)
+        seen, out = set(), []
+        for i in ids:
+            if i not in seen:
+                seen.add(i)
+                out.append(i)
+        return out
+
+    @property
     def feishu_verification_token(self) -> str:
         return os.getenv("FEISHU_VERIFICATION_TOKEN", "")
 

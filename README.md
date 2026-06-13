@@ -160,7 +160,7 @@ nano .env
 必填项：
 - `LLM_API_KEY` — 模型服务 API Key；本地 OpenAI-compatible 服务通常可留空
 - `FEISHU_APP_ID` / `FEISHU_APP_SECRET` — 飞书自建应用凭证
-- `FEISHU_RECEIVE_ID` — 接收人 open_id/user_id/email
+- `FEISHU_RECEIVE_ID` — 接收人 open_id/user_id/email。**多用户**：填多个用逗号分隔，例如 `FEISHU_RECEIVE_ID=ou_aaa,ou_bbb`；所有接收人共用同一个 `FEISHU_RECEIVE_ID_TYPE`（要么都是 open_id、要么都是 user_id/email）。旧的 `FEISHU_RECEIVE_ID_2` 仍兼容。
 
 ### 3. 配置模型
 
@@ -774,7 +774,7 @@ Required values:
 
 - `LLM_API_KEY` — model-service API key; local OpenAI-compatible services can often leave this empty
 - `FEISHU_APP_ID` / `FEISHU_APP_SECRET` — Feishu/Lark self-built app credentials
-- `FEISHU_RECEIVE_ID` — receiver `open_id`, `user_id` or email
+- `FEISHU_RECEIVE_ID` — receiver `open_id`, `user_id` or email. **Multiple users**: comma-separate several IDs, e.g. `FEISHU_RECEIVE_ID=ou_aaa,ou_bbb`; they all share one `FEISHU_RECEIVE_ID_TYPE` (so all `open_id`, or all `user_id`/email). The legacy `FEISHU_RECEIVE_ID_2` still works.
 
 Edit `.env` with your LLM and Feishu/Lark credentials, then run:
 
