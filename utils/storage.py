@@ -144,6 +144,33 @@ class Storage:
             note TEXT,
             created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS announcements (
+            source TEXT NOT NULL,
+            announcement_id TEXT NOT NULL,
+            code TEXT NOT NULL,
+            name TEXT,
+            title TEXT,
+            published_at TEXT,
+            url TEXT,
+            org_id TEXT,
+            fetched_at TEXT NOT NULL,
+            PRIMARY KEY (source, announcement_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_announcements_code_published
+            ON announcements(code, published_at);
+        CREATE TABLE IF NOT EXISTS announcement_fetch_progress (
+            code TEXT NOT NULL,
+            chunk_start TEXT NOT NULL,
+            chunk_end TEXT NOT NULL,
+            status TEXT NOT NULL,
+            attempts INTEGER DEFAULT 0,
+            fetched_count INTEGER DEFAULT 0,
+            error TEXT,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (code, chunk_start, chunk_end)
+        );
+        CREATE INDEX IF NOT EXISTS idx_announcement_progress_status
+            ON announcement_fetch_progress(status);
         """)
         self._add_column(conn, "price_alerts", "direction", "direction TEXT NOT NULL DEFAULT 'below'")
         self._add_column(conn, "news", "fetched_at", "fetched_at TEXT")
@@ -160,7 +187,7 @@ class Storage:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
 
     def _conn(self) -> sqlite3.Connection:
-        return sqlite3.connect(str(self.db_path), check_same_thread=False)
+        return sqlite3.connect(str(self.db_path), timeout=30, check_same_thread=False)
 
     def upsert_kline(self, code: str, trade_date: str, row: dict):
         with self._conn() as conn:
@@ -235,6 +262,111 @@ class Storage:
                 """,
                 [score, model_version, code, title, ts]
             )
+
+    def upsert_announcements(self, rows: list[dict]):
+        if not rows:
+            return
+        now = datetime.now().isoformat(timespec="seconds")
+        payload = []
+        for row in rows:
+            announcement_id = row.get("announcement_id")
+            raw_code = str(row.get("code") or "").strip()
+            if not announcement_id or not raw_code:
+                continue
+            code = raw_code.zfill(6)
+            payload.append({
+                "source": row.get("source") or "cninfo",
+                "announcement_id": str(announcement_id),
+                "code": code,
+                "name": row.get("name"),
+                "title": row.get("title"),
+                "published_at": row.get("published_at"),
+                "url": row.get("url"),
+                "org_id": row.get("org_id"),
+                "fetched_at": row.get("fetched_at") or now,
+            })
+        if not payload:
+            return
+        with self._conn() as conn:
+            conn.executemany("""
+                INSERT INTO announcements
+                (source, announcement_id, code, name, title, published_at, url, org_id, fetched_at)
+                VALUES (:source, :announcement_id, :code, :name, :title, :published_at, :url, :org_id, :fetched_at)
+                ON CONFLICT(source, announcement_id) DO UPDATE SET
+                    code=excluded.code,
+                    name=excluded.name,
+                    title=excluded.title,
+                    published_at=excluded.published_at,
+                    url=excluded.url,
+                    org_id=excluded.org_id,
+                    fetched_at=excluded.fetched_at
+            """, payload)
+
+    def get_announcements(self, codes: list[str] | None = None,
+                          start: str | None = None,
+                          end: str | None = None) -> list[dict]:
+        clauses = []
+        params: list[Any] = []
+        if codes is not None:
+            codes = [str(code).strip().zfill(6) for code in codes if str(code).strip()]
+            if not codes:
+                return []
+            placeholders = ",".join("?" for _ in codes)
+            clauses.append(f"code IN ({placeholders})")
+            params.extend(codes)
+        if start:
+            clauses.append("published_at >= ?")
+            params.append(start)
+        if end:
+            clauses.append("published_at <= ?")
+            params.append(end)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._conn() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(f"""
+                SELECT * FROM announcements
+                {where}
+                ORDER BY published_at ASC, code ASC
+            """, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_announcement_progress(self, codes: list[str] | None = None) -> list[dict]:
+        params: list[Any] = []
+        where = ""
+        if codes is not None:
+            codes = [str(code).strip().zfill(6) for code in codes if str(code).strip()]
+            if not codes:
+                return []
+            placeholders = ",".join("?" for _ in codes)
+            where = f"WHERE code IN ({placeholders})"
+            params.extend(codes)
+        with self._conn() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(f"""
+                SELECT * FROM announcement_fetch_progress
+                {where}
+            """, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def mark_announcement_chunk(self, code: str, chunk_start: str, chunk_end: str,
+                                status: str, attempts: int, fetched_count: int = 0,
+                                error: str | None = None):
+        now = datetime.now().isoformat(timespec="seconds")
+        with self._conn() as conn:
+            conn.execute("""
+                INSERT INTO announcement_fetch_progress
+                (code, chunk_start, chunk_end, status, attempts, fetched_count, error, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(code, chunk_start, chunk_end) DO UPDATE SET
+                    status=excluded.status,
+                    attempts=excluded.attempts,
+                    fetched_count=excluded.fetched_count,
+                    error=excluded.error,
+                    updated_at=excluded.updated_at
+            """, [
+                str(code).strip().zfill(6), chunk_start, chunk_end, status,
+                attempts, fetched_count, error, now,
+            ])
 
     def insert_decision(self, run_id: str, run_ts: str, dec: dict):
         with self._conn() as conn:

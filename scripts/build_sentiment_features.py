@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import argparse
-import math
 import os
-import re
 import sqlite3
 import sys
 from datetime import time, timedelta
@@ -21,7 +19,6 @@ from utils.storage import Storage
 
 
 CUTOFF_TIME = time(15, 0)
-CNINFO_PAGE_SIZE = 30
 NEWS_WINDOWS = (1, 3, 7)
 ANN_WINDOWS = (7, 20)
 ANN_TYPES = {
@@ -41,11 +38,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--end", default=None, help="Feature end date, YYYY-MM-DD.")
     parser.add_argument("--codes", default="", help="Comma-separated stock codes.")
     parser.add_argument("--max-codes", type=int, default=0, help="Limit codes for smoke tests.")
-    parser.add_argument("--announcement-timeout", type=float, default=15.0, help="Per cninfo request timeout in seconds.")
-    parser.add_argument("--announcement-retries", type=int, default=3, help="Per cninfo request retry count.")
-    parser.add_argument("--announcement-chunk-months", type=int, default=3, help="Months per cninfo date chunk.")
     parser.add_argument("--no-news", action="store_true", help="Skip forward-collected news features.")
-    parser.add_argument("--no-announcements", action="store_true", help="Skip cninfo announcement features.")
+    parser.add_argument("--no-announcements", action="store_true", help="Skip local cninfo announcement features.")
     return parser.parse_args()
 
 
@@ -95,6 +89,8 @@ def _to_feature_date(value, trade_dates: pd.Index) -> pd.Timestamp | None:
     ts = pd.to_datetime(value, errors="coerce")
     if pd.isna(ts):
         return None
+    if ts.tzinfo is not None:
+        ts = ts.tz_convert("Asia/Shanghai").tz_localize(None)
     day = ts.normalize()
     if day < trade_dates.min():
         return None
@@ -107,6 +103,19 @@ def _to_feature_date(value, trade_dates: pd.Index) -> pd.Timestamp | None:
     if idx >= len(trade_dates):
         return None
     return trade_dates[idx]
+
+
+def _announcement_available_at(value) -> pd.Timestamp | None:
+    ts = pd.to_datetime(value, errors="coerce")
+    if pd.isna(ts):
+        return None
+    if ts.tzinfo is not None:
+        ts = ts.tz_convert("Asia/Shanghai").tz_localize(None)
+    # Some CNINFO rows expose only a date-like midnight timestamp. Treat those
+    # as post-close to avoid using same-day information that may not be visible.
+    if ts.time() == time(0, 0):
+        return ts.normalize() + pd.Timedelta(hours=15, seconds=1)
+    return ts
 
 
 def _empty_events(columns: list[str]) -> pd.DataFrame:
@@ -148,151 +157,29 @@ def _classify_announcement(title: str) -> str:
     return "other"
 
 
-def _request_json(session, method: str, url: str, timeout: float, retries: int, **kwargs) -> dict:
-    last_exc = None
-    for _attempt in range(max(1, retries)):
-        try:
-            response = session.request(method, url, timeout=(5, timeout), **kwargs)
-            response.raise_for_status()
-            return response.json()
-        except Exception as exc:
-            last_exc = exc
-    raise last_exc
-
-
-def _cninfo_stock_org_ids(timeout: float, retries: int) -> dict[str, str]:
-    import requests
-
-    url = "http://www.cninfo.com.cn/new/data/szse_stock.json"
-    session = requests.Session()
-    items = _request_json(session, "GET", url, timeout, retries).get("stockList", [])
-    return {
-        str(item.get("code", "")).zfill(6): str(item.get("orgId", ""))
-        for item in items
-        if item.get("code") and item.get("orgId")
-    }
-
-
-def _clean_title(title: str) -> str:
-    text = re.sub(r"</?em>", "", str(title or ""))
-    return " ".join(text.split())[:200]
-
-
-def _fetch_cninfo_announcements(code: str, org_id: str, start: str, end: str,
-                                timeout: float, retries: int) -> list[dict]:
-    import requests
-
-    url = "http://www.cninfo.com.cn/new/hisAnnouncement/query"
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0",
-        "Referer": "http://www.cninfo.com.cn/new/commonUrl/pageOfSearch?url=disclosure/list/search",
-    })
-    payload = {
-        "pageNum": "1",
-        "pageSize": str(CNINFO_PAGE_SIZE),
-        "column": "szse",
-        "tabName": "fulltext",
-        "plate": "",
-        "stock": f"{code},{org_id}",
-        "searchkey": "",
-        "secid": "",
-        "category": "",
-        "trade": "",
-        "seDate": f"{start[:4]}-{start[4:6]}-{start[6:]}~{end[:4]}-{end[4:6]}-{end[6:]}",
-        "sortName": "",
-        "sortType": "",
-        "isHLtitle": "true",
-    }
-
-    first_page = _request_json(session, "POST", url, timeout, retries, params=payload)
-    total = int(first_page.get("totalAnnouncement") or 0)
-    page_count = max(1, math.ceil(total / CNINFO_PAGE_SIZE))
-    pages = [first_page]
-    for page in range(2, page_count + 1):
-        payload["pageNum"] = str(page)
-        pages.append(_request_json(session, "POST", url, timeout, retries, data=payload))
-
-    rows = []
-    for page in pages:
-        for item in page.get("announcements") or []:
-            published_at = pd.to_datetime(
-                item.get("announcementTime"), unit="ms", utc=True, errors="coerce",
-            )
-            if pd.isna(published_at):
-                continue
-            published_at = published_at.tz_convert("Asia/Shanghai").tz_localize(None)
-            announcement_id = item.get("announcementId", "")
-            item_org_id = item.get("orgId") or org_id
-            link = (
-                "http://www.cninfo.com.cn/new/disclosure/detail?"
-                f"stockCode={code}&announcementId={announcement_id}"
-                f"&orgId={item_org_id}&announcementTime={published_at}"
-            )
-            rows.append({
-                "代码": str(item.get("secCode") or code).zfill(6),
-                "简称": str(item.get("secName") or ""),
-                "公告标题": _clean_title(item.get("announcementTitle", "")),
-                "公告时间": published_at,
-                "公告链接": link,
-            })
-    return rows
-
-
-def _date_chunks(start: pd.Timestamp, end: pd.Timestamp, months: int):
-    months = max(1, months)
-    current = start.normalize()
-    end = end.normalize()
-    while current <= end:
-        chunk_end = min(current + pd.DateOffset(months=months) - pd.Timedelta(days=1), end)
-        yield current.strftime("%Y%m%d"), chunk_end.strftime("%Y%m%d")
-        current = chunk_end + pd.Timedelta(days=1)
-
-
 def _load_announcement_events(codes: list[str], trade_dates: pd.Index,
-                              start_date: pd.Timestamp, end_date: pd.Timestamp,
-                              timeout: float, retries: int, chunk_months: int) -> pd.DataFrame:
+                              start_date: pd.Timestamp, end_date: pd.Timestamp) -> pd.DataFrame:
     start = start_date - timedelta(days=45)
-    end = end_date
     rows = []
-    org_ids = _cninfo_stock_org_ids(timeout, retries)
-    for idx, code in enumerate(codes, start=1):
-        if idx == 1 or idx % 50 == 0 or idx == len(codes):
-            print(f"announcements: {idx}/{len(codes)} {code}", flush=True)
-        org_id = org_ids.get(code)
-        if not org_id:
-            print(f"announcement fetch skipped {code}: missing cninfo orgId", flush=True)
+    end = pd.Timestamp(end_date).normalize() + pd.Timedelta(days=1)
+    items = Storage().get_announcements(
+        codes=codes,
+        start=pd.Timestamp(start).strftime("%Y-%m-%d"),
+        end=end.strftime("%Y-%m-%d"),
+    )
+    for row in items:
+        available_at = _announcement_available_at(row.get("published_at"))
+        feature_date = _to_feature_date(available_at, trade_dates)
+        if feature_date is None:
             continue
-        items = []
-        seen_items = set()
-        for chunk_start, chunk_end in _date_chunks(pd.Timestamp(start), pd.Timestamp(end), chunk_months):
-            try:
-                chunk_items = _fetch_cninfo_announcements(code, org_id, chunk_start, chunk_end, timeout, retries)
-            except Exception as exc:
-                print(f"announcement fetch skipped {code} {chunk_start}-{chunk_end}: {exc}", flush=True)
-                continue
-            for item in chunk_items:
-                key = (item.get("代码"), str(item.get("公告时间")), item.get("公告标题"))
-                if key in seen_items:
-                    continue
-                seen_items.add(key)
-                items.append(item)
-        for row in items:
-            published_at = pd.to_datetime(row.get("公告时间"), errors="coerce")
-            if pd.isna(published_at):
-                continue
-            available_at = published_at
-            feature_date = _to_feature_date(available_at, trade_dates)
-            if feature_date is None:
-                continue
-            title = str(row.get("公告标题", ""))[:200]
-            rows.append({
-                "code": str(row.get("代码", code)).zfill(6),
-                "feature_date": feature_date,
-                "title": title,
-                "ann_type": _classify_announcement(title),
-                "source": "cninfo",
-            })
+        title = str(row.get("title", ""))[:200]
+        rows.append({
+            "code": str(row.get("code", "")).zfill(6),
+            "feature_date": feature_date,
+            "title": title,
+            "ann_type": _classify_announcement(title),
+            "source": row.get("source") or "cninfo",
+        })
     if not rows:
         return _empty_events(["code", "feature_date", "title", "ann_type", "source"])
     out = pd.DataFrame(rows)
@@ -424,9 +311,6 @@ def main() -> None:
             trade_dates,
             pd.to_datetime(grid["trade_date"]).min(),
             output_end,
-            args.announcement_timeout,
-            args.announcement_retries,
-            args.announcement_chunk_months,
         )
         frame = _add_announcement_features(frame, anns)
         print(f"announcement events used: {len(anns)}")

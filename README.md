@@ -489,20 +489,30 @@ STOCKWATCH_LGBM_FEATURE_SET=all python scripts/train_lgbm.py
 
 ### 消息面 / 公告特征
 
-通用新闻情绪只能使用前向采集的数据：`news` 表会记录 `fetched_at`、`available_at` 和 `sentiment_model_version`，训练时应以 `available_at` 作为可见时间，不能用今天回补到的历史新闻重建过去信号。巨潮公告可按公告日期回补；日期型公告会保守滚到下一交易日，避免收盘前不可见的同日泄漏。
+通用新闻情绪只能使用前向采集的数据：`news` 表会记录 `fetched_at`、`available_at` 和 `sentiment_model_version`，训练时应以 `available_at` 作为可见时间，不能用今天回补到的历史新闻重建过去信号。巨潮公告先回补到本地 raw store，再离线构建特征；日期型/午夜公告会保守滚到下一交易日，避免收盘前不可见的同日泄漏。
 
 ```bash
 python scripts/check_sentiment_pit.py
+python scripts/backfill_announcements.py --mode by-code --workers 4
+python scripts/inspect_announcements.py
 python scripts/build_sentiment_features.py
 python scripts/evaluate_sentiment_features.py --features news_score_7d,ann_count_20d
 ```
 
-`build_sentiment_features.py` 会输出 `~/.stockwatch/history/sentiment_features.parquet`。新闻分数缺失保持 `NaN`，另有 `has_news_7d` 标志位；先用 `evaluate_sentiment_features.py` 单独看 IC/decile，再决定是否并入主训练集。
-全历史公告回补建议离线运行：
+`backfill_announcements.py` 会把 cninfo 原始公告 upsert 到 SQLite，并用 `announcement_fetch_progress` 记录每个 chunk 的 `pending/done/failed` 状态；重启时会跳过已完成 chunk，失败 chunk 会在下次运行继续补。`build_sentiment_features.py` 只读本地 raw 公告库，不再直接访问 cninfo。
+
+`build_sentiment_features.py` 会输出 `~/.stockwatch/history/sentiment_features.parquet`。新闻分数缺失保持 `NaN`，另有 `has_news_7d` 标志位；先用 `evaluate_sentiment_features.py` 单独看 IC/decile，再决定是否并入主训练集。全历史公告回补建议放到后台离线运行：
 
 ```bash
-python scripts/build_sentiment_features.py --no-news --announcement-chunk-months 3
+nohup python scripts/backfill_announcements.py --mode by-code --workers 4 --delay 0.2 > announcement_backfill.log 2>&1 &
+python scripts/build_sentiment_features.py --no-news
 python scripts/evaluate_sentiment_features.py
+```
+
+cninfo 的历史公告接口也支持 `stock` 留空后的全市场日期窗口分页。如果按票回补太慢，可以用较短日期窗口减少请求数：
+
+```bash
+python scripts/backfill_announcements.py --mode market --chunk-days 7 --workers 2 --delay 0.2
 ```
 
 `check_sentiment_pit.py` 是合成数据断言，覆盖 15:00 cutoff、周末滚动和 available_at 后移的 shift 测试。
