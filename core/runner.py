@@ -165,6 +165,45 @@ def once():
     # 2. 实时报价 + 大盘
     quotes = market.get_realtime_quote(codes)
     logger.info(f"实时报价获取: {len(quotes)} 只")
+    if cfg.enable_propagation:
+        try:
+            from analysis.propagation import (
+                detect_leaders_from_quotes,
+                find_related_candidates_from_history,
+            )
+            leaders = detect_leaders_from_quotes(
+                quotes,
+                threshold=cfg.propagation_leader_return_threshold,
+            )
+            slots = max(0, cfg.max_stocks_per_run - len(codes))
+            if leaders and slots:
+                leader_returns = {
+                    code: float(quotes.get(code, {}).get("pct_change") or 0) / 100.0
+                    for code in leaders
+                }
+                candidates = find_related_candidates_from_history(
+                    cfg.propagation_history_dir,
+                    leaders,
+                    leader_returns,
+                    existing_codes=set(codes),
+                    max_candidates=min(cfg.propagation_max_candidates, slots),
+                    min_corr=cfg.propagation_min_corr,
+                )
+                added = []
+                for row in candidates:
+                    code = row["code"]
+                    if code not in codes:
+                        codes.append(code)
+                        added.append(code)
+                if added:
+                    quotes.update(market.get_realtime_quote(added))
+                    logger.info(f"关联补涨扩展池: +{len(added)} 只 {added}")
+            elif leaders:
+                logger.info("关联补涨识别到领涨股，但分析池已达上限，跳过扩展")
+            else:
+                logger.info("关联补涨未识别到达阈值的领涨股")
+        except Exception as e:
+            logger.warning(f"关联补涨扩展失败，跳过: {e}")
     north_context = _format_north_context(market.get_north_money())
     sht_pct = market.get_index_pct()
     logger.info(f"大盘上下文: {north_context}; 上证涨跌 {sht_pct:.2f}%")
@@ -252,6 +291,22 @@ def once():
 
     alpha_contexts = {}
     lgbm_contexts = {}
+    propagation_contexts = {}
+    if cfg.enable_propagation and decisions:
+        try:
+            from analysis.propagation import compute_latest_propagation_features
+            kline_map = {d["code"]: d["kline"] for d in decisions}
+            propagation_features, propagation_contexts = compute_latest_propagation_features(
+                [d["code"] for d in decisions],
+                quotes,
+                kline_map,
+                leader_return_threshold=cfg.propagation_leader_return_threshold,
+                min_corr=cfg.propagation_min_corr,
+            )
+            for d in decisions:
+                d.setdefault("factors", {}).update(propagation_features.get(d["code"], {}))
+        except Exception as e:
+            logger.warning(f"关联补涨特征生成失败，跳过: {e}")
     factor_map = {d["code"]: d.get("factors", {}) for d in decisions if d.get("factors")}
     if cfg.enable_alpha158 and factor_map:
         try:
@@ -267,6 +322,13 @@ def once():
             lgbm_contexts = format_lgbm_context(scores)
         except Exception as e:
             logger.warning(f"LightGBM 推理失败，跳过: {e}")
+    if propagation_contexts:
+        for d in decisions:
+            code = d["code"]
+            line = propagation_contexts.get(code, "")
+            if line:
+                current = lgbm_contexts.get(code, "")
+                lgbm_contexts[code] = "\n".join(part for part in [current, line] if part)
 
     # 5. 情绪分析（批量）
     batch = [(d["code"], d["name"]) for d in decisions[:30]]

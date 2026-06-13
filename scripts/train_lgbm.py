@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from analysis.factors import ALPHA158_FEATURES
+from analysis.propagation import PROPAGATION_FEATURES
 
 STABLE_FEATURE_PREFIXES = (
     "ILLIQ", "BETA", "RSV", "DD", "RET", "ROC", "RELV", "STD",
@@ -58,16 +59,19 @@ def _split_by_date_with_purge(df, label_horizon: int):
     return train, val, test, split
 
 
-def _feature_names() -> tuple[str, list[str]]:
+def _feature_names(available_columns: set[str]) -> tuple[str, list[str]]:
     feature_set = os.getenv("STOCKWATCH_LGBM_FEATURE_SET", "stable").strip().lower()
     if feature_set == "all":
-        return "all", ALPHA158_FEATURES
+        names = [*ALPHA158_FEATURES, *PROPAGATION_FEATURES]
+        return "all", [name for name in names if name in available_columns]
     if feature_set != "stable":
         print(f"unknown STOCKWATCH_LGBM_FEATURE_SET={feature_set}, fallback to stable")
-    return "stable", [
+    names = [
         name for name in ALPHA158_FEATURES
         if name.startswith(STABLE_FEATURE_PREFIXES)
     ]
+    names.extend(PROPAGATION_FEATURES)
+    return "stable", [name for name in names if name in available_columns]
 
 
 def _mean_ndcg(df, pred, k: int) -> float | None:
@@ -259,7 +263,7 @@ def main():
     train, val, test, split = _split_by_date_with_purge(df, label_horizon)
     if train.empty or val.empty or test.empty:
         raise RuntimeError("训练/验证/测试切分为空，请检查历史数据跨度")
-    feature_set, feature_names = _feature_names()
+    feature_set, feature_names = _feature_names(set(df.columns))
     if not feature_names:
         raise RuntimeError("训练特征为空，请检查 STOCKWATCH_LGBM_FEATURE_SET")
 
@@ -317,6 +321,8 @@ def main():
         "feature_set": feature_set,
         "feature_count": len(feature_names),
         "available_feature_count": len(ALPHA158_FEATURES),
+        "propagation_feature_count": len([name for name in PROPAGATION_FEATURES if name in feature_names]),
+        "propagation_features": [name for name in PROPAGATION_FEATURES if name in feature_names],
         "label_horizon_days": label_horizon,
         "return_col": return_col,
         "ndcg5": test_metrics["ndcg5"],

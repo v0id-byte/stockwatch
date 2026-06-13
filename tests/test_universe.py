@@ -20,10 +20,10 @@ class TestIsTradingDay:
 
     @patch("akshare.tool_trade_date_hist_sina")
     def test_known_trading_day(self, mock_ak):
-        mock_ak.return_value = _make_trade_dates_df(["2026-06-13"])
+        mock_ak.return_value = _make_trade_dates_df(["2026-06-12"])
         u = self._universe()
         with patch("data.universe.date") as mock_date:
-            mock_date.today.return_value = date(2026, 6, 13)
+            mock_date.today.return_value = date(2026, 6, 12)
             mock_date.fromisoformat = date.fromisoformat
             assert u.is_trading_day() is True
 

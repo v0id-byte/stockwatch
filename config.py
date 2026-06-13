@@ -251,6 +251,27 @@ class Config:
         return _env_bool("ENABLE_SECTOR", False)
 
     @property
+    def enable_propagation(self) -> bool:
+        return _env_bool("ENABLE_PROPAGATION", False)
+
+    @property
+    def propagation_max_candidates(self) -> int:
+        return int(os.getenv("PROPAGATION_MAX_CANDIDATES", "10"))
+
+    @property
+    def propagation_leader_return_threshold(self) -> float:
+        return float(os.getenv("PROPAGATION_LEADER_RETURN_THRESHOLD", "0.04"))
+
+    @property
+    def propagation_min_corr(self) -> float:
+        return float(os.getenv("PROPAGATION_MIN_CORR", "0.15"))
+
+    @property
+    def propagation_history_dir(self) -> Path:
+        raw = os.getenv("PROPAGATION_HISTORY_DIR", "~/.stockwatch/history/stocks")
+        return Path(os.path.expanduser(raw))
+
+    @property
     def any_v2_enabled(self) -> bool:
         return any([
             self.enable_calibration,
@@ -258,6 +279,7 @@ class Config:
             self.enable_lgbm,
             self.enable_regime,
             self.enable_sector,
+            self.enable_propagation,
         ])
 
     @property
@@ -267,6 +289,7 @@ class Config:
             self.enable_lgbm,
             self.enable_regime,
             self.enable_sector,
+            self.enable_propagation,
         ])
 
     # === 运行 ===

@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from analysis.factors import ALPHA158_FEATURES, WINDOWS, compute_alpha158_frame
+from analysis.propagation import PROPAGATION_FEATURES, add_propagation_features
 
 WARMUP = max(WINDOWS)  # 最长滚动窗口，窗口未填满的行丢弃
 DEFAULT_HORIZONS = (5, 20, 60)
@@ -23,6 +24,13 @@ def _env_int(name: str, default: int) -> int:
         return int(raw)
     except ValueError:
         return default
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 def _forward_return(close, horizon: int):
@@ -52,6 +60,7 @@ def main():
     market = pd.read_parquet(market_path)
     label_horizon = _env_int("STOCKWATCH_LABEL_HORIZON_DAYS", 20)
     drawdown_penalty = float(os.getenv("STOCKWATCH_DRAWDOWN_PENALTY", "0.5"))
+    enable_propagation = _env_bool("STOCKWATCH_ENABLE_PROPAGATION_FEATURES", True)
     if label_horizon not in DEFAULT_HORIZONS:
         horizons = tuple(sorted({*DEFAULT_HORIZONS, label_horizon}))
     else:
@@ -70,6 +79,7 @@ def main():
         factors["code"] = code
         close = pd.to_numeric(kline["close"], errors="coerce")
         factors["close"] = close.values
+        factors["volume"] = pd.to_numeric(kline["volume"], errors="coerce").values
         for horizon in horizons:
             factors[f"forward_{horizon}d_return"] = _forward_return(close, horizon).values
         drawdown_col = f"forward_{label_horizon}d_drawdown"
@@ -85,6 +95,13 @@ def main():
     return_col = f"forward_{label_horizon}d_return"
     data = data.dropna(subset=[return_col, "label_score"])
     data["trade_date"] = data["trade_date"].astype(str)
+    feature_names = list(ALPHA158_FEATURES)
+    if enable_propagation:
+        data = add_propagation_features(data)
+        feature_names.extend(PROPAGATION_FEATURES)
+    else:
+        for name in PROPAGATION_FEATURES:
+            data[name] = 0.0
     data["label"] = data.groupby("trade_date")["label_score"].transform(
         lambda values: (values.rank(method="first", pct=True) * 10).clip(0, 9).astype(int)
     )
@@ -93,7 +110,7 @@ def main():
         *[f"forward_{horizon}d_return" for horizon in horizons],
         f"forward_{label_horizon}d_drawdown",
     ]
-    keep = [*meta_cols, *ALPHA158_FEATURES]
+    keep = [*meta_cols, *feature_names]
     out = data[keep].replace([float("inf"), float("-inf")], 0).fillna(0)
     output = root / "training_set.parquet"
     out.to_parquet(output, index=False)
@@ -102,6 +119,9 @@ def main():
         "rows": len(out),
         "codes": int(out["code"].nunique()),
         "features": len(ALPHA158_FEATURES),
+        "propagation_features_enabled": enable_propagation,
+        "propagation_features": PROPAGATION_FEATURES if enable_propagation else [],
+        "total_features": len(feature_names),
         "label_horizon_days": label_horizon,
         "drawdown_penalty": drawdown_penalty,
         "date_start": str(out["trade_date"].min()),
