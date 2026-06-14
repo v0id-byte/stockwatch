@@ -4,12 +4,16 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from bot.financial_report import help_financial_report
+
 
 _CODE_RE = re.compile(r"(?<!\d)(\d{6})(?!\d)")
 _PRICE_ALERT_RE = re.compile(r"^(盯买|盯价|加仓提醒|买点|挂单)[+\s,，:：]*(\d{6})(?:[+\s,，:：]*(\d+(?:\.\d+)?))?(?:[+\s,，]*(\d+(?:\.\d+)?)(?:股)?)?")
 _CANCEL_PRICE_ALERT_RE = re.compile(r"^(取消盯价|取消盯买|停止盯价|撤销盯价|不盯了)[+\s,，:：]*(\d{6})")
 _BUY_RE = re.compile(r"^(买入|买|跟踪|建仓)[+\s,，:：]*(\d{6})(?:[+\s,，:：]*(\d+(?:\.\d+)?))?(?:[+\s,，]*(\d+(?:\.\d+)?)(?:股)?)?")
 _SELL_RE = re.compile(r"^(卖出|卖|停止跟踪|取消跟踪|不跟了)[+\s,，:：]*(\d{6})")
+_FINANCIAL_REPORT_RE = re.compile(r"^(财报解析|财报|财务报告|年报解析|看财报)\s*(\d{6})?")
+_CANCEL_FLOW_RE = re.compile(r"^(取消财报|退出财报|重置菜单|取消菜单)")
 
 
 @dataclass
@@ -43,6 +47,17 @@ def parse_command(text: str) -> BotCommand:
     cancel_alert = _CANCEL_PRICE_ALERT_RE.search(text)
     if cancel_alert:
         return BotCommand("cancel_price_alert", code=cancel_alert.group(2))
+
+    fin_match = _FINANCIAL_REPORT_RE.match(text)
+    if fin_match:
+        return BotCommand(
+            "financial_report_menu",
+            code=fin_match.group(2) or "",
+            text=text,
+        )
+
+    if _CANCEL_FLOW_RE.match(text):
+        return BotCommand("cancel_pending_flow")
 
     price_alert = _PRICE_ALERT_RE.search(text)
     if price_alert:
@@ -81,8 +96,11 @@ def help_lines() -> list[str]:
         "**可用命令**",
         "查股票：`600519` 或 `查 600519`",
         "问近况：`宁夏建材重组怎么样`、`600449 最近一周走势如何`",
+        "财报解析：`财报解析 600519`，机器人先列选项，回 `1 2 3 4`（或 a b c d）开始解读",
         "开始跟踪：`买入 600519 1680`，可追加数量：`买入 600519 1680 100股`",
         "盯加仓价：`盯买 600519 1500`，可追加数量：`盯买 600519 1500 100股`",
         "取消盯价：`取消盯价 600519`",
         "停止跟踪：`卖出 600519` 或 `停止跟踪 600519`",
+        "",
+        *help_financial_report(),
     ]

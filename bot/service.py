@@ -8,7 +8,16 @@ from loguru import logger
 
 from analysis.sentiment import batch_sentiment_details
 from analysis.technical import compute_tech_score
-from bot.research import answer_market_question, answer_stock_question, resolve_stock
+from bot.financial_report import (
+    render_option_menu,
+    answer_financial_report,
+)
+from bot.research import (
+    StockRef,
+    answer_market_question,
+    answer_stock_question,
+    resolve_stock,
+)
 from config import get_config
 from data.market import MarketData
 from decision.engine import DecisionEngine
@@ -66,6 +75,58 @@ class BotService:
         if count:
             return render_text_card("已停止跟踪", [f"已停止跟踪 `{code}`。"], template="green")
         return render_text_card("未找到跟踪", [f"`{code}` 没有正在跟踪的持仓。"], template="orange")
+
+    def financial_report_menu(self, code: str = "") -> dict:
+        """First turn of 财报解析：解析股票并展示 4 维度选项菜单。
+
+        如果 ``code`` 缺失或解析失败，返回引导用户补全代码的卡片（依旧
+        带出菜单方便用户先看选项）。
+        """
+        stock = None
+        if code:
+            stock = resolve_stock(code, self.market)
+            if stock:
+                quote_name = self.market.get_realtime_quote([stock.code]).get(stock.code, {}).get("name")
+                if quote_name:
+                    stock.name = quote_name
+
+        menu = render_option_menu()
+        if stock:
+            title = f"{stock.name}({stock.code}) 财报解析"
+            body = [f"已识别股票：`{stock.name}({stock.code})`", "", menu]
+        else:
+            title = "财报解析"
+            body = [
+                "未识别到股票代码。请用 `财报解析 <6位代码>` 重发，例如 `财报解析 600519`。",
+                "",
+                menu,
+            ]
+        return render_text_card(title, body, template="blue")
+
+    def financial_report_answer(
+        self,
+        stock: StockRef,
+        selections: dict[str, int] | None,
+    ) -> dict:
+        """Run the actual analysis once the user has picked options."""
+        try:
+            answer, _, choices = answer_financial_report(stock, selections)
+        except Exception as e:
+            logger.exception(f"财报解析失败 {stock.code}: {e}")
+            return render_text_card(
+                f"{stock.name}({stock.code}) 财报解析失败",
+                [f"本次解析异常：{e}", "请稍后重试或换一只股票。"],
+                template="red",
+            )
+
+        choices_summary = " | ".join(
+            f"{dim.title}={dim.options[idx - 1][0]}"
+            for dim, idx in choices.values()
+        )
+        title = f"{stock.name}({stock.code}) 财报解读"
+        header = f"本次解读维度：{choices_summary}"
+        body = [header, "", *answer.splitlines()]
+        return render_text_card(title, body, template="blue")
 
     def open_price_alert(self, user_id: str, chat_id: str, code: str,
                          trigger_price: float, quantity: float | None = None,

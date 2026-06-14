@@ -750,6 +750,26 @@ def _run_web_action(params: dict[str, list[str]], storage: Storage) -> dict:
             return _run_web_command(f"停止跟踪 {_first(params, 'code')}", storage)
         if action == "cancel_price_alert":
             return _run_web_command(f"取消盯价 {_first(params, 'code')}", storage)
+        if action == "financial_report":
+            from bot.financial_report import DIMENSIONS
+            from bot.research import resolve_stock
+            from bot.service import BotService
+
+            code = _stock_code(_first(params, "code"))
+            # 表单每个维度是一个独立的 <select>，直接读 fr_<key> 即可。
+            selections: dict[str, int] = {}
+            for dim in DIMENSIONS:
+                value = _first(params, f"fr_{dim.key}")
+                if value and value.isdigit() and 1 <= int(value) <= len(dim.options):
+                    selections[dim.key] = int(value)
+            service = BotService(storage)
+            stock = resolve_stock(code, service.market)
+            if not stock:
+                return _error_result(f"无法识别股票代码 {code}，请检查后重试")
+            quote_name = service.market.get_realtime_quote([stock.code]).get(stock.code, {}).get("name")
+            if quote_name:
+                stock.name = quote_name
+            return _card_to_result(service.financial_report_answer(stock, selections))
         return _run_web_command(_first(params, "question"), storage)
     except Exception as exc:
         return _error_result(str(exc))
@@ -1724,6 +1744,7 @@ def render_console(storage: Storage, settings: dict[str, str], result: dict | No
                    question: str = "", notice: str = "") -> str:
     data = load_dashboard_data(storage)
     result_html = _console_result_html(result)
+    fr_form = _financial_report_form()
     content = f"""
     <div class="console-grid">
       <section class="panel">
@@ -1778,12 +1799,44 @@ def render_console(storage: Storage, settings: dict[str, str], result: dict | No
           <input name="code" placeholder="代码 600519">
           <button type="submit">取消盯价提醒</button>
         </form>
+        {fr_form}
       </section>
     </div>
     {_positions_table(data['positions'])}
     {_alerts_table(data['price_alerts'])}
     """
     return _layout("console", "AI 控制台", "网页里直接问行情、查股票和控制盯盘", content, settings, notice)
+
+
+def _financial_report_form() -> str:
+    """财报解析表单：4 个维度的下拉选择 + 股票代码。"""
+    from bot.financial_report import DIMENSIONS
+
+    selects = []
+    for dim in DIMENSIONS:
+        options = [
+            f"<option value='{i}'{' selected' if i == dim.default else ''}>{i}. {label}</option>"
+            for i, (label, _) in enumerate(dim.options, 1)
+        ]
+        selects.append(
+            _field(
+                f"【{dim.title}】",
+                f"<select name='fr_{dim.key}'>{''.join(options)}</select>",
+                hint="默认选项已预选，可以不动。",
+            )
+        )
+    form = f"""
+    <hr>
+    <h3>财报解析</h3>
+    <form method="post" action="/console" class="options" data-console-form>
+      <input type="hidden" name="console_action" value="financial_report">
+      {_field("股票代码", "<input name='code' placeholder='600519' required>")}
+      {''.join(selects)}
+      <button type="submit">拉取并解读财报</button>
+      <div class="hint">本功能只汇总公开财报数据并由模型解读，<b>不构成投资建议</b>，最终数据以巨潮资讯网披露原文为准。</div>
+    </form>
+    """
+    return form
 
 
 def render_watchlist_settings(settings: dict[str, str], notice: str = "") -> str:

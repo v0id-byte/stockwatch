@@ -615,12 +615,20 @@ def format_stock_snapshot(
 
 
 def _format_sources(items: list[dict], prefix: str) -> str:
+    """Render the source list. Items with a non-empty ``url`` field get a clickable
+    link on the next line so the user can verify the original source."""
     if not items:
         return f"{prefix}: 暂无"
     lines = []
     for i, item in enumerate(items[:8], 1):
         label = item.get("label") or f"{prefix}{i}"
-        lines.append(f"- [{label}] {item.get('date', '')} {item.get('source', '')}: {item.get('title', '')}")
+        lines.append(
+            f"- [{label}] {item.get('date', '')} {item.get('source', '')}: "
+            f"{item.get('title', '')}"
+        )
+        url = str(item.get("url") or "").strip()
+        if url and url.startswith(("http://", "https://")):
+            lines.append(f"  详情：{url}")
     return "\n".join(lines)
 
 
