@@ -159,9 +159,9 @@ def _print_dashboard_url(prefix: str = "") -> None:
         print("浏览器在另一台机器时：")
         if lan:
             print(f"  · 同一局域网直接打开 http://{lan}:{port}")
-        print("  · 或 SSH 端口转发：")
-        print("        ssh -L 8765:127.0.0.1:8765 rpi@mc.void1211.com -p 1211")
-        print("      然后浏览器打开 http://127.0.0.1:8765")
+        print("  · 或 SSH 端口转发（用你自己的 ssh 登录信息）：")
+        print(f"        ssh -L {port}:127.0.0.1:{port} <用户>@<服务器>")
+        print(f"      然后浏览器打开 http://127.0.0.1:{port}")
 
 
 def _print_auth_hint() -> None:
