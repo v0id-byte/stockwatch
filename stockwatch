@@ -1,0 +1,18 @@
+#!/bin/bash
+# stockwatch — unified CLI entry. Resolves the real project root (follows symlinks).
+set -e
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+    TARGET="$(readlink "$SOURCE")"
+    if [[ "$TARGET" = /* ]]; then
+        SOURCE="$TARGET"
+    else
+        SOURCE="$(cd "$(dirname "$SOURCE")" && pwd)/$TARGET"
+    fi
+done
+SCRIPT_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
+VENV_PY="$SCRIPT_DIR/.venv/bin/python"
+if [ -x "$VENV_PY" ]; then
+    exec "$VENV_PY" "$SCRIPT_DIR/cli.py" "$@"
+fi
+exec python3 "$SCRIPT_DIR/cli.py" "$@"

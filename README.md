@@ -103,6 +103,42 @@ ollama pull qwen2.5:7b
 
 ---
 
+### `stockwatch` 一行命令（推荐已安装用户）
+
+项目根目录有一个 `stockwatch` 可执行脚本，配合 `stockwatch install` 链接到 `~/.local/bin` 之后，
+在任意目录、任意终端（包括 `ssh` 进服务器后）都能直接输入：
+
+```bash
+stockwatch              # 总览：服务状态 + Web 控制台地址
+stockwatch dashboard    # 确保 Web 控制台在跑，并打印怎么访问
+stockwatch start        # 同 dashboard，一行命令开 Web 控制台
+stockwatch stop         # 停 Web 控制台
+stockwatch restart      # 重启 Web 控制台
+stockwatch status       # 所有服务详细状态
+stockwatch logs -f      # 持续看 Web 控制台日志
+stockwatch open         # 在本机浏览器中打开 Web 控制台
+
+stockwatch daemon start|stop|restart|status|logs   # 管理盯盘守护进程
+stockwatch bot    start|stop|restart|status|logs   # 管理飞书机器人
+
+stockwatch once         # 立即跑一次完整分析
+stockwatch test         # 自检 AKShare / LLM / 飞书
+stockwatch demo 600519  # 终端问答体验
+stockwatch help         # 帮助
+```
+
+首次安装：
+
+```bash
+cd <项目根目录>
+./stockwatch install    # 在 ~/.local/bin 建一个软链；需要时把 ~/.local/bin 加进 PATH
+```
+
+服务器（已用 systemd 跑了 `stockwatch-dashboard.service`）上，`stockwatch dashboard` 会自动确认服务在跑，
+并把本机/局域网访问地址、SSH 端口转发命令一起打印出来——再不用记 8765 和 IP。
+
+---
+
 ### 打开 Web 控制台
 
 Web 控制台是不需要飞书的全功能入口——可以查股票、设盯价、看提醒历史、配置参数。
