@@ -257,7 +257,9 @@ class DecisionEngine:
     def __init__(self, storage):
         self.storage = storage
         self.cfg = get_config()
-        self.llm = get_llm_client()
+        # 规则模式（ai_enabled=False）下完全不需要 LLM 客户端：决策一律走兜底 HOLD，
+        # 价值由 runner/monitor 的止损/盯价/公告/持仓提醒提供。
+        self.llm = get_llm_client() if self.cfg.ai_enabled else None
         self.calibrator = ConfidenceCalibrator(storage) if self.cfg.enable_calibration else None
 
     def decide_one(self, code: str, name: str, tech_score: float,
@@ -291,6 +293,12 @@ class DecisionEngine:
         if kline and len(kline) < 60:
             logger.info(f"{code}({name}) 上市不足60个交易日，强制 HOLD")
             return self._hold_decision(code, name, current_price, "上市不足60个交易日", analysis_payload)
+
+        # ---- 规则模式：跳过 LLM，直接兜底 HOLD ----
+        if not self.cfg.ai_enabled:
+            return self._hold_decision(
+                code, name, current_price, "规则模式（未启用AI）", analysis_payload
+            )
 
         # ---- LLM 决策 ----
         try:

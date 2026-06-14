@@ -1,5 +1,6 @@
 """盘中轻量监控：盯关键价 + 重大新闻扫描。"""
 import hashlib
+import time
 from datetime import datetime
 
 from loguru import logger
@@ -9,6 +10,7 @@ from data.market import MarketData
 from data.news import NewsData
 from push.feishu import FeishuClient, render_text_card
 from utils.storage import Storage
+from utils.health import record_source_health
 from analysis.sentiment import SENTIMENT_SCORE_MODEL_VERSION, score_news_items
 
 
@@ -66,7 +68,12 @@ def _monitor_price_alerts(storage: Storage, market: MarketData, feishu: FeishuCl
     if not alerts:
         return
     codes = sorted({alert["code"] for alert in alerts})
+    _t_quote = time.perf_counter()
     quotes = market.get_realtime_quote(codes)
+    record_source_health(
+        "行情", bool(quotes), (time.perf_counter() - _t_quote) * 1000,
+        None if quotes else "未获取到任何实时报价", len(quotes),
+    )
     today = datetime.now().date().isoformat()
 
     for alert in alerts:
@@ -111,12 +118,23 @@ def _monitor_price_alerts(storage: Storage, market: MarketData, feishu: FeishuCl
             ]
         if alert.get("quantity"):
             lines.insert(2, f"计划数量：{float(alert['quantity']):g}股")
-        card = render_text_card(title, lines, template=template)
-        if _send_alert_card(feishu, alert.get("chat_id", ""), card):
+        if feishu is None:
+            # web 模式没有飞书推送面，落到首页「盘中提醒」feed。每天每条提醒最多
+            # 记一次（key 含日期），与 last_notified_at 的当日去重一致。
+            storage.record_web_alert(
+                event_key=f"webalert:price:{alert['id']}:{today}",
+                category="盯价", level=level,
+                code=alert["code"], name=alert.get("name", alert["code"]),
+                title=title, body="\n".join(lines),
+            )
             storage.mark_price_alert_notified(alert["id"])
+        else:
+            card = render_text_card(title, lines, template=template)
+            if _send_alert_card(feishu, alert.get("chat_id", ""), card):
+                storage.mark_price_alert_notified(alert["id"])
 
 
-def _monitor_major_news(storage: Storage, market: MarketData, feishu: FeishuClient):
+def _monitor_major_news(storage: Storage, market: MarketData, feishu: FeishuClient | None):
     cfg = get_config()
     alerts = storage.get_active_price_alerts()
     positions = storage.get_active_tracked_positions()
@@ -142,21 +160,27 @@ def _monitor_major_news(storage: Storage, market: MarketData, feishu: FeishuClie
         if not fresh_news:
             continue
         batch = fresh_news[:5]
-        try:
-            scores = score_news_items(batch)
-        except Exception as e:
-            logger.warning(f"重大新闻打分失败 {code}: {e}")
-            continue
+        # 规则模式（未启用 AI）下不调 LLM 打分——既省掉一轮带重试的失败开销，也避免
+        # 把"未打分"误写成中性 0 分。此时只靠标题关键词识别重大消息（停牌/立案/退市…）。
+        scores: list[float] = []
+        if cfg.ai_enabled:
+            try:
+                scores = score_news_items(batch)
+            except Exception as e:
+                logger.warning(f"重大新闻打分失败 {code}: {e}")
+                scores = []
+        scored = bool(scores) and len(scores) >= len(batch)
         if len(scores) < len(batch):
             scores.extend([0.0] * (len(batch) - len(scores)))
 
         for item, score in zip(batch, scores):
             key = _news_event_key(code, item)
             title = str(item.get("title", ""))
-            storage.update_news_sentiment(
-                code, title, item.get("ts", ""), score,
-                model_version=SENTIMENT_SCORE_MODEL_VERSION,
-            )
+            if scored:
+                storage.update_news_sentiment(
+                    code, title, item.get("ts", ""), score,
+                    model_version=SENTIMENT_SCORE_MODEL_VERSION,
+                )
             is_major = abs(score) >= 0.8 or _major_news_by_title(title)
             if not is_major:
                 storage.mark_alert_event(key, "news_seen", code, title)
@@ -169,13 +193,23 @@ def _monitor_major_news(storage: Storage, market: MarketData, feishu: FeishuClie
                 storage.mark_alert_event(key, "news_filtered", code, title)
                 logger.info(f"重大新闻提醒被 ALERT_LEVELS 过滤 {code} level={level}")
                 continue
-            card = render_text_card("个股重大消息提醒", [
-                f"**{name}**({code}) {direction}消息 {score:+.2f}",
+            headline = (
+                f"**{name}**({code}) {direction}消息 {score:+.2f}"
+                if scored else f"**{name}**({code}) 标题命中重大关键词"
+            )
+            lines = [
+                headline,
                 f"来源：{item.get('source', '未知')}",
                 f"标题：{title}",
                 f"时间：{item.get('ts', '')}",
-            ], template=template)
-            if feishu.send_message(card):
+            ]
+            if feishu is None:
+                storage.record_web_alert(
+                    event_key=key, category="重大消息", level=level,
+                    code=code, name=name, title=title, body="\n".join(lines),
+                )
+                storage.mark_alert_event(key, "major_news", code, title)
+            elif feishu.send_message(render_text_card("个股重大消息提醒", lines, template=template)):
                 storage.mark_alert_event(key, "major_news", code, title)
 
 
@@ -186,7 +220,7 @@ def monitor_once(check_news: bool = False):
     market = MarketData()
     feishu = FeishuClient() if cfg.notify_channel == "feishu" else None
     if feishu is None:
-        logger.info("NOTIFY_CHANNEL=web，盘中轻量监控会记录触价状态并跳过飞书推送")
+        logger.info("NOTIFY_CHANNEL=web，盘中监控把触发的盯价/卖压/重大消息写入 Web 控制台「盘中提醒」")
     _monitor_price_alerts(storage, market, feishu)
-    if check_news and feishu:
+    if check_news:
         _monitor_major_news(storage, market, feishu)

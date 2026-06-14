@@ -64,6 +64,10 @@ class Storage:
         self._add_column(conn, "decisions", "calibrated_confidence", "calibrated_confidence REAL")
         self._add_column(conn, "decisions", "resolved_at", "resolved_at TEXT")
         self._add_column(conn, "decisions", "success", "success INTEGER")
+        # 运行级健康：status=ok/partial/failed（区别于 pushed_ok——安静但健康的一天
+        # pushed_ok=0 却 status=ok）；"最近一次成功运行" 应按 status='ok' 判定。
+        self._add_column(conn, "runs", "status", "status TEXT DEFAULT 'ok'")
+        self._add_column(conn, "runs", "error", "error TEXT")
         conn.executescript("""
         CREATE TABLE IF NOT EXISTS calibration_model (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -171,6 +175,33 @@ class Storage:
         );
         CREATE INDEX IF NOT EXISTS idx_announcement_progress_status
             ON announcement_fetch_progress(status);
+        CREATE TABLE IF NOT EXISTS source_health (
+            source TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            last_ok_at TEXT,
+            last_error_at TEXT,
+            last_error TEXT,
+            last_latency_ms REAL,
+            last_count INTEGER,
+            ok_count INTEGER DEFAULT 0,
+            fail_count INTEGER DEFAULT 0,
+            updated_at TEXT NOT NULL
+        );
+        -- 盘中监控（monitor）在 NOTIFY_CHANNEL=web 时没有飞书推送面，把触发的
+        -- 盯价/卖压/重大消息提醒落到这张表，首页「盘中提醒」feed 渲染。event_key
+        -- 唯一以去重（与 alert_events 同款 key），INSERT OR IGNORE 保证幂等。
+        CREATE TABLE IF NOT EXISTS web_alerts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_key TEXT UNIQUE,
+            category TEXT,
+            level TEXT,
+            code TEXT,
+            name TEXT,
+            title TEXT,
+            body TEXT,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_web_alerts_created ON web_alerts(created_at);
         """)
         self._add_column(conn, "price_alerts", "direction", "direction TEXT NOT NULL DEFAULT 'below'")
         self._add_column(conn, "news", "fetched_at", "fetched_at TEXT")
@@ -187,7 +218,14 @@ class Storage:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
 
     def _conn(self) -> sqlite3.Connection:
-        return sqlite3.connect(str(self.db_path), timeout=30, check_same_thread=False)
+        conn = sqlite3.connect(str(self.db_path), timeout=30, check_same_thread=False)
+        # 守护进程（runner/monitor）与 Web 控制台是两个独立进程共用同一个 SQLite，
+        # 又各自多线程访问。默认 rollback-journal 模式下并发写极易 "database is locked"。
+        # 开 WAL 让读写不互斥，busy_timeout 让偶发写锁自动等待而非立刻报错。
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        return conn
 
     def upsert_kline(self, code: str, trade_date: str, row: dict):
         with self._conn() as conn:
@@ -400,11 +438,19 @@ class Storage:
             )
 
     def insert_run(self, run_id: str, stats: dict):
+        payload = {
+            "run_id": run_id,
+            "run_ts": datetime.now().isoformat(),
+            "status": "ok",
+            "error": None,
+            **stats,
+        }
         with self._conn() as conn:
             conn.execute("""
-                INSERT OR REPLACE INTO runs (run_id, run_ts, stocks_analyzed, llm_calls, tokens_used, pushed_count, pushed_ok)
-                VALUES (:run_id, :run_ts, :stocks_analyzed, :llm_calls, :tokens_used, :pushed_count, :pushed_ok)
-            """, {"run_id": run_id, "run_ts": datetime.now().isoformat(), **stats})
+                INSERT OR REPLACE INTO runs
+                (run_id, run_ts, stocks_analyzed, llm_calls, tokens_used, pushed_count, pushed_ok, status, error)
+                VALUES (:run_id, :run_ts, :stocks_analyzed, :llm_calls, :tokens_used, :pushed_count, :pushed_ok, :status, :error)
+            """, payload)
 
     def get_recent_runs(self, limit: int = 10) -> list[dict]:
         with self._conn() as conn:
@@ -412,6 +458,56 @@ class Storage:
             rows = conn.execute(
                 "SELECT * FROM runs ORDER BY run_ts DESC LIMIT ?", [limit]
             ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_last_successful_run_ts(self) -> str | None:
+        """最近一次 data-fetch 成功的运行时间。按 status='ok' 判定，而非 pushed_ok——
+        安静但健康的一天没有可推送信号（pushed_ok=0）依然是一次成功运行。"""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT run_ts FROM runs WHERE status='ok' ORDER BY run_ts DESC LIMIT 1"
+            ).fetchone()
+        return row[0] if row else None
+
+    def upsert_source_health(self, source: str, ok: bool, latency_ms: float = 0.0,
+                             error: str | None = None, count: int = 0):
+        """记录单个数据源一次拉取的健康状况（成功/失败/延迟/条数）。供首页健康横幅展示。"""
+        now = datetime.now().isoformat(timespec="seconds")
+        row = {
+            "source": source,
+            "status": "ok" if ok else "error",
+            "last_ok_at": now if ok else None,
+            "last_error_at": None if ok else now,
+            "last_error": None if ok else (str(error)[:300] if error else "未知错误"),
+            "last_latency_ms": round(float(latency_ms), 1),
+            "last_count": int(count or 0),
+            "ok_inc": 1 if ok else 0,
+            "fail_inc": 0 if ok else 1,
+            "updated_at": now,
+        }
+        with self._conn() as conn:
+            conn.execute("""
+                INSERT INTO source_health
+                (source, status, last_ok_at, last_error_at, last_error, last_latency_ms,
+                 last_count, ok_count, fail_count, updated_at)
+                VALUES (:source, :status, :last_ok_at, :last_error_at, :last_error, :last_latency_ms,
+                        :last_count, :ok_inc, :fail_inc, :updated_at)
+                ON CONFLICT(source) DO UPDATE SET
+                    status=excluded.status,
+                    last_ok_at=COALESCE(excluded.last_ok_at, source_health.last_ok_at),
+                    last_error_at=COALESCE(excluded.last_error_at, source_health.last_error_at),
+                    last_error=COALESCE(excluded.last_error, source_health.last_error),
+                    last_latency_ms=excluded.last_latency_ms,
+                    last_count=excluded.last_count,
+                    ok_count=source_health.ok_count + excluded.ok_count,
+                    fail_count=source_health.fail_count + excluded.fail_count,
+                    updated_at=excluded.updated_at
+            """, row)
+
+    def get_source_health(self) -> list[dict]:
+        with self._conn() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute("SELECT * FROM source_health ORDER BY source").fetchall()
         return [dict(r) for r in rows]
 
     def upsert_market_regime_history(self, rows: list[dict]):
@@ -671,6 +767,27 @@ class Storage:
                 VALUES (?, ?, ?, ?, ?)
             """, [event_key, event_type, code, title, datetime.now().isoformat()])
 
+    def record_web_alert(self, event_key: str, category: str, level: str,
+                         code: str, name: str, title: str, body: str):
+        """盘中监控在 web 模式下把一条触发的提醒写入首页「盘中提醒」feed。
+        event_key 唯一去重，重复触发静默忽略。"""
+        with self._conn() as conn:
+            conn.execute("""
+                INSERT OR IGNORE INTO web_alerts
+                (event_key, category, level, code, name, title, body, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, [event_key, category, level, code, name, title, body,
+                  datetime.now().isoformat()])
+
+    def get_recent_web_alerts(self, limit: int = 20) -> list[dict]:
+        with self._conn() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM web_alerts ORDER BY created_at DESC, id DESC LIMIT ?",
+                [limit],
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def insert_alert_feedback(self, row: dict):
         with self._conn() as conn:
             conn.execute("""
@@ -693,3 +810,23 @@ class Storage:
                 ORDER BY created_at DESC, id DESC LIMIT ?
             """, [limit]).fetchall()
         return [dict(r) for r in rows]
+
+    def get_misreported_codes(self, days: int = 30, min_count: int = 2) -> dict[str, dict]:
+        """近 days 天内被标记「误报」占多数的个股，用于回灌推送门槛。
+        返回 {code: {"bad": n, "good": m}}，仅含 误报>=min_count 且 误报>有用 的代码。"""
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+        with self._conn() as conn:
+            rows = conn.execute("""
+                SELECT code,
+                       SUM(CASE WHEN label='误报' THEN 1 ELSE 0 END) AS bad,
+                       SUM(CASE WHEN label='有用' THEN 1 ELSE 0 END) AS good
+                FROM alert_feedback
+                WHERE code IS NOT NULL AND code != '' AND created_at >= ?
+                GROUP BY code
+            """, [cutoff]).fetchall()
+        result = {}
+        for code, bad, good in rows:
+            bad, good = int(bad or 0), int(good or 0)
+            if bad >= min_count and bad > good:
+                result[str(code)] = {"bad": bad, "good": good}
+        return result

@@ -12,11 +12,26 @@ def test():
     print("=" * 40)
 
     try:
+        import time
+        from datetime import date
         from data.market import MarketData
+        from utils.storage import Storage
         data = MarketData()
+        _t = time.perf_counter()
         quotes = data.get_realtime_quote(["600519"])
-        name = quotes.get("600519", {}).get("name", "未知")
-        print(f"✅ 行情接口成功 → {name}")
+        latency = (time.perf_counter() - _t) * 1000
+        quote = quotes.get("600519", {})
+        name = quote.get("name", "未知")
+        Storage().upsert_source_health(
+            "行情", bool(quotes), latency,
+            None if quotes else "未获取到报价", len(quotes),
+        )
+        if quotes:
+            qt = str(quote.get("quote_time") or "")
+            stale = "" if qt[:8] == date.today().strftime("%Y%m%d") else "（非当日时间戳，可能非交易时段或数据延迟）"
+            print(f"✅ 行情接口成功 → {name}（{latency:.0f}ms）{stale}")
+        else:
+            print("❌ 行情接口失败：未获取到报价")
     except Exception as e:
         print(f"❌ 行情接口失败: {e}")
 
@@ -24,9 +39,12 @@ def test():
         from config import get_config
         from utils.llm import get_llm_client
         cfg = get_config()
-        llm = get_llm_client()
-        llm.chat([{"role": "user", "content": "Hello, reply OK"}])
-        print(f"✅ LLM 连接成功 → {cfg.llm_provider}/{cfg.llm_model}")
+        if not cfg.ai_enabled:
+            print("✅ 运行模式：规则模式（未启用AI）→ 跳过LLM测试；止损/盯价/公告提醒照常运行")
+        else:
+            llm = get_llm_client()
+            llm.chat([{"role": "user", "content": "Hello, reply OK"}])
+            print(f"✅ LLM 连接成功 → {cfg.llm_provider}/{cfg.llm_model}")
     except Exception as e:
         print(f"❌ LLM 失败: {e}")
 
@@ -72,6 +90,20 @@ def test():
             print("✅ regime 检查完成 → 未启用")
     except Exception as e:
         print(f"❌ v2 模块检查失败: {e}")
+
+    try:
+        from utils.storage import Storage
+        rows = Storage().get_source_health()
+        if rows:
+            print("-" * 40)
+            print("数据源健康（历史累计）")
+            for r in rows:
+                flag = "✅" if r.get("status") == "ok" else "❌"
+                last = r.get("last_ok_at") or r.get("last_error_at") or "-"
+                extra = f"，最近错误：{r['last_error']}" if r.get("status") != "ok" and r.get("last_error") else ""
+                print(f"  {flag} {r['source']}：最近 {last}，成功 {r.get('ok_count', 0)} / 失败 {r.get('fail_count', 0)}{extra}")
+    except Exception as e:
+        print(f"  数据源健康读取失败: {e}")
 
     print("=" * 40)
 

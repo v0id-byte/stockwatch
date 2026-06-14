@@ -196,6 +196,9 @@ def get_announcements(code: str, question: str) -> list[dict]:
     end = _date_yyyymmdd()
     recent_start = _date_yyyymmdd(45)
 
+    import time as _time
+    from utils.health import record_source_health
+    _t_anno = _time.perf_counter()
     try:
         df = _ak_call(
             ak.stock_zh_a_disclosure_report_cninfo,
@@ -204,8 +207,10 @@ def get_announcements(code: str, question: str) -> list[dict]:
             end_date=end,
         )
         recent_items.extend(_announcement_from_cninfo(dict(row)) for _, row in df.head(6).iterrows())
+        record_source_health("公告", True, (_time.perf_counter() - _t_anno) * 1000, None, len(recent_items))
     except Exception as e:
         logger.warning(f"近期公告获取失败 {code}: {e}")
+        record_source_health("公告", False, (_time.perf_counter() - _t_anno) * 1000, str(e))
 
     if _has_reorg_intent(question):
         for keyword in ("重组", "吸收合并", "资产出售"):
@@ -545,6 +550,9 @@ def format_market_snapshot(snapshot: dict) -> str:
 
 def answer_market_question(question: str, market: MarketData, storage: Storage) -> str:
     snapshot = build_market_snapshot(market, storage)
+    from config import get_config
+    if not get_config().ai_enabled:
+        return format_market_snapshot(snapshot)
     style_instruction, max_tokens = _response_style()
     system_prompt = (
         "你是给非专业家人使用的 A 股行情助手。只根据提供的数据回答，"
@@ -642,6 +650,9 @@ def _label_items(items: list[dict], prefix: str) -> list[dict]:
 
 
 def answer_stock_question(question: str, stock: StockRef, market: MarketData, storage: Storage) -> str:
+    from config import get_config
+    if not get_config().ai_enabled:
+        return format_stock_snapshot(question, stock, market, storage)
     quote = market.get_realtime_quote([stock.code]).get(stock.code, {})
     name = str(quote.get("name") or stock.name or stock.code)
     kline = _ensure_kline(stock.code, market, storage)

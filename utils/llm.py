@@ -42,7 +42,15 @@ def get_token_usage() -> int:
 class BaseLLMClient:
     def chat_json(self, messages: list[dict]) -> dict:
         """调用并强制解析为 JSON，超时兜底返回空 dict"""
-        raw = self.chat(messages)
+        from utils.health import record_source_health
+        import time as _time
+        _t = _time.perf_counter()
+        try:
+            raw = self.chat(messages)
+        except Exception as exc:
+            record_source_health("AI模型", False, (_time.perf_counter() - _t) * 1000, str(exc))
+            raise
+        record_source_health("AI模型", True, (_time.perf_counter() - _t) * 1000)
         raw = self._strip_think(raw)
         raw = raw.strip()
         # 去掉 markdown 围栏

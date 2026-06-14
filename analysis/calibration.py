@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import math
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from loguru import logger
 
@@ -44,6 +44,69 @@ class ConfidenceCalibrator:
         coef = float(model.get("coef") or 0.0)
         intercept = float(model.get("intercept") or 0.0)
         return max(0.0, min(1.0, sigmoid(coef * raw_confidence + intercept)))
+
+
+def _run_date(run_ts: str) -> datetime:
+    return datetime.fromisoformat(str(run_ts).replace("Z", "+00:00")).replace(tzinfo=None)
+
+
+def _resolve_one(storage: Storage, decision: dict, lookback_days: int) -> int | None:
+    """根据决策后 lookback_days 个交易日的走势判定 BUY/SELL 是否达标。
+    返回 1=成功 / 0=失败 / None=数据不足或多空模糊，无法判定。"""
+    run_dt = _run_date(decision["run_ts"])
+    end_dt = run_dt + timedelta(days=lookback_days * 3 + 7)
+    rows = storage.get_kline(
+        decision["code"],
+        run_dt.strftime("%Y-%m-%d"),
+        end_dt.strftime("%Y-%m-%d"),
+    )
+    if len(rows) < lookback_days + 1:
+        return None
+
+    current = float(rows[0]["close"] or 0)
+    future = rows[1:lookback_days + 1]
+    if current <= 0 or not future:
+        return None
+
+    max_high = max(float(row["high"] or 0) for row in future)
+    min_low = min(float(row["low"] or 0) for row in future)
+    end_close = float(future[-1]["close"] or 0)
+    target = float(decision.get("target_price") or 0)
+    stop = float(decision.get("stop_loss") or 0)
+    action = decision["action"]
+
+    if action == "BUY":
+        success = (target > 0 and max_high >= target) or end_close > current * 1.03
+        fail = (stop > 0 and min_low <= stop) or end_close < current * 0.98
+    elif action == "SELL":
+        success = (target > 0 and min_low <= target) or end_close < current * 0.98
+        fail = (stop > 0 and max_high >= stop) or end_close > current * 1.03
+    else:
+        return None
+
+    if success and fail:
+        return None
+    if success:
+        return 1
+    if fail:
+        return 0
+    return None
+
+
+def resolve_decisions(storage: Storage, lookback_days: int) -> int:
+    """结算所有窗口已到期、尚未结算的 BUY/SELL 决策，写回 decisions.success。
+    幂等：已结算的不会重复处理；窗口未到期的跳过。供 daemon 与 train_calibration 复用。"""
+    resolved = 0
+    for decision in storage.get_unresolved_action_decisions():
+        run_dt = _run_date(decision["run_ts"])
+        if datetime.now() < run_dt + timedelta(days=lookback_days):
+            continue
+        success = _resolve_one(storage, decision, lookback_days)
+        if success is None:
+            continue
+        storage.mark_decision_resolved(decision["id"], success)
+        resolved += 1
+    return resolved
 
 
 def make_model_row(action: str, sample_size: int, coef: float, intercept: float,

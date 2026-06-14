@@ -1,4 +1,5 @@
 """完整分析流程（once）及其辅助函数。"""
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -14,6 +15,7 @@ from analysis.technical import compute_tech_score
 from analysis.sentiment import SENTIMENT_SCORE_MODEL_VERSION, batch_sentiment_details
 from decision.engine import DecisionEngine
 from push.feishu import FeishuClient, render_card, render_text_card
+from utils.health import record_source_health
 
 
 ALERT_LEVEL_LABELS = {
@@ -163,7 +165,12 @@ def once():
         return
 
     # 2. 实时报价 + 大盘
+    _t_quote = time.perf_counter()
     quotes = market.get_realtime_quote(codes)
+    record_source_health(
+        "行情", bool(quotes), (time.perf_counter() - _t_quote) * 1000,
+        None if quotes else "未获取到任何实时报价", len(quotes),
+    )
     logger.info(f"实时报价获取: {len(quotes)} 只")
     if cfg.enable_propagation:
         try:
@@ -243,18 +250,29 @@ def once():
     # 3. 并行拉取 K 线（网络 I/O；写入串行保证 SQLite 安全）
     today_str = datetime.now().strftime("%Y-%m-%d")
     codes_to_fetch = [c for c in codes if not storage.kline_cached_today(c)]
+    kline_ok = kline_fail = 0
     if codes_to_fetch:
         logger.info(f"并发拉取K线 {len(codes_to_fetch)} 只（8线程）")
+        _t_kline = time.perf_counter()
         with ThreadPoolExecutor(max_workers=8) as executor:
             futures = {executor.submit(market.get_daily_kline, c): c for c in codes_to_fetch}
             for fut in as_completed(futures):
                 c = futures[fut]
                 try:
                     rows = fut.result()
+                    if rows:
+                        kline_ok += 1
+                    else:
+                        kline_fail += 1
                     for row in rows:
                         storage.upsert_kline(c, row["trade_date"], row)
                 except Exception as e:
+                    kline_fail += 1
                     logger.warning(f"K线并发获取失败 {c}: {e}")
+        record_source_health(
+            "K线", kline_fail == 0, (time.perf_counter() - _t_kline) * 1000,
+            f"{kline_fail} 只K线获取失败" if kline_fail else None, kline_ok,
+        )
 
     # 4. 技术分析 + Alpha158（串行）
     llm_calls = 0
@@ -384,6 +402,8 @@ def once():
     run_results = []
     final_decisions = []
     tracked_notify_ids_by_code = {}
+    # 误报反馈回灌：被用户多次标「误报」的个股，非 critical 提醒一律抑制（止损/强风险仍照发）
+    misreported = storage.get_misreported_codes()
 
     for d in decisions:
         decision = engine.decide_one(
@@ -409,7 +429,12 @@ def once():
             level = _decision_alert_level(decision)
             decision["_alert_level"] = level
             all_alert_results.append(decision)
-            if cfg.alert_level_enabled(level):
+            if level != "critical" and decision["code"] in misreported:
+                logger.info(
+                    f"决策提醒被『误报反馈』抑制 {decision['code']} level={level} "
+                    f"(近30日误报 {misreported[decision['code']]['bad']} 次)"
+                )
+            elif cfg.alert_level_enabled(level):
                 run_results.append(decision)
             else:
                 logger.info(
@@ -453,12 +478,22 @@ def once():
 
     # 8. 统计
     tokens_used = get_token_usage()
+    # 运行级健康：行情拉空 = 失败；K线部分失败 = 部分异常；否则成功。
+    # 注意与 pushed_ok 区分——安静但健康的一天没有可推送信号，status 仍是 ok。
+    if not quotes:
+        run_status, run_error = "failed", "实时报价获取失败"
+    elif kline_fail:
+        run_status, run_error = "partial", f"{kline_fail} 只K线获取失败"
+    else:
+        run_status, run_error = "ok", None
     storage.insert_run(run_id, {
         "stocks_analyzed": len(decisions),
         "llm_calls": llm_calls,
         "tokens_used": tokens_used,
         "pushed_count": len(run_results),
         "pushed_ok": 1 if push_ok else 0,
+        "status": run_status,
+        "error": run_error,
     })
 
     logger.info(

@@ -1,11 +1,25 @@
 #!/bin/bash
-# StockWatch 一键安装脚本（树莓派 / Linux）
+# StockWatch 一键安装脚本（树莓派 / Linux，systemd）
 
 set -e
 
 echo "============================================"
 echo "  StockWatch 安装脚本"
 echo "============================================"
+
+# ---- 平台检查：本脚本依赖 apt + systemd（树莓派 / Debian / Ubuntu）----
+if [ "$(uname -s)" != "Linux" ]; then
+    echo ""
+    echo "  本脚本面向树莓派 / Linux（apt + systemd）。"
+    echo "  在 macOS 上请改用： bash start.sh   （自动建 venv、装依赖、起服务）"
+    echo "  装好后所有配置都能在 Web 控制台里点（不必手改 .env）：http://localhost:8765"
+    echo ""
+    exit 1
+fi
+if ! command -v systemctl > /dev/null 2>&1; then
+    echo "  未检测到 systemd（systemctl）。请改用 bash start.sh 前台运行，或自行用 cron/supervisor 守护。"
+    exit 1
+fi
 
 # ---- 基础依赖 ----
 echo "[1/6] 安装系统依赖..."
@@ -92,6 +106,9 @@ echo "============================================"
 echo "  安装完成！"
 echo ""
 echo "  下一步操作："
+echo "  给家人用 / 想零配置：在 .env 里设 ENABLE_AI=off（规则模式），"
+echo "    不配任何大模型也能跑止损/盯价/公告/持仓提醒；AI 与「必看模式」之后都能在 Web 控制台里点。"
+echo ""
 echo "  1. 编辑配置: nano $WORKDIR/.env"
 echo "  2. 测试连接:  cd $WORKDIR && source .venv/bin/activate && python main.py test"
 echo "  3. 手动运行:  cd $WORKDIR && source .venv/bin/activate && python main.py once"

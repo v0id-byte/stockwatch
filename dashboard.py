@@ -17,6 +17,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
 from analysis.report import build_report
+from config import get_config
 from utils.storage import Storage
 
 
@@ -35,10 +36,12 @@ DEFAULT_SETTINGS = {
     "LLM_API_KEY": "",
     "LLM_BASE_URL": "https://api.minimaxi.com/v1",
     "LLM_MODEL": "MiniMax-M2.7",
+    "ENABLE_AI": "auto",
     "WATCHLIST": "600519,000858,510300,510500,159915",
     "MAX_STOCKS_PER_RUN": "50",
     "MIN_CONFIDENCE_TO_PUSH": "0.6",
     "ALERT_LEVELS": "critical,warning,info",
+    "MUST_SEE_MODE": "false",
     "ENABLE_REASSURANCE_MODE": "false",
     "ENABLE_FAMILY_BRIEF": "false",
     "ENABLE_AFTER_CLOSE_SUMMARY": "false",
@@ -778,7 +781,7 @@ def _run_web_action(params: dict[str, list[str]], storage: Storage) -> dict:
 def load_dashboard_data(storage: Storage) -> dict:
     with storage._conn() as conn:
         runs = _rows(conn, """
-            SELECT run_id, run_ts, stocks_analyzed, llm_calls, tokens_used, pushed_count, pushed_ok
+            SELECT run_id, run_ts, stocks_analyzed, llm_calls, tokens_used, pushed_count, pushed_ok, status, error
             FROM runs ORDER BY run_ts DESC LIMIT 12
         """)
         decisions = _rows(conn, """
@@ -800,8 +803,13 @@ def load_dashboard_data(storage: Storage) -> dict:
         "decisions": decisions,
         "positions": positions,
         "price_alerts": price_alerts,
+        "web_alerts": storage.get_recent_web_alerts(20),
         "feedback": storage.get_recent_alert_feedback(20),
         "report": report,
+        "source_health": storage.get_source_health(),
+        "last_successful_run_ts": storage.get_last_successful_run_ts(),
+        "ai_enabled": get_config().ai_enabled,
+        "misreported": storage.get_misreported_codes(),
     }
 
 
@@ -863,6 +871,80 @@ def _summary_cards(data: dict) -> str:
     )
 
 
+def _ago(value) -> str:
+    """把 ISO 时间转成「X 分钟前」这样的人话；空值返回 暂无。"""
+    if not value:
+        return "暂无"
+    try:
+        dt = datetime.fromisoformat(str(value))
+    except ValueError:
+        return _date(value)
+    secs = (datetime.now() - dt).total_seconds()
+    if secs < 60:
+        return "刚刚"
+    if secs < 3600:
+        return f"{int(secs // 60)} 分钟前"
+    if secs < 86400:
+        return f"{int(secs // 3600)} 小时前"
+    return f"{int(secs // 86400)} 天前"
+
+
+HEALTH_SOURCE_ORDER = ["行情", "K线", "新闻", "公告", "AI模型"]
+
+
+def _health_chip(name: str, state: str, detail: str, title: str = "") -> str:
+    title_attr = f" title='{_e(title)}'" if title else ""
+    return (
+        f"<span class='health-chip {state}'{title_attr}>"
+        f"<span class='dot'></span>{_e(name)}<em>{_e(detail)}</em></span>"
+    )
+
+
+def _health_banner(data: dict) -> str:
+    """首页常驻：数据源健康状态 + 最近一次成功运行时间。
+    直接回答用户「它今天到底有没有在好好替我盯」。"""
+    health = {row.get("source"): row for row in data.get("source_health", [])}
+    ai_enabled = data.get("ai_enabled", True)
+    last_ok = data.get("last_successful_run_ts")
+
+    chips = []
+    any_error = False
+    has_any = False
+    for name in HEALTH_SOURCE_ORDER:
+        if name == "AI模型" and not ai_enabled:
+            chips.append(_health_chip(name, "off", "规则模式 · 未启用"))
+            continue
+        row = health.get(name)
+        if not row:
+            chips.append(_health_chip(name, "unknown", "未运行"))
+            continue
+        has_any = True
+        ok = row.get("status") == "ok"
+        if not ok:
+            any_error = True
+            when = _ago(row.get("last_error_at") or row.get("updated_at"))
+            chips.append(_health_chip(name, "error", f"异常 · {when}", row.get("last_error") or ""))
+        else:
+            chips.append(_health_chip(name, "ok", _ago(row.get("last_ok_at"))))
+
+    if not has_any and not last_ok:
+        overall_cls, overall_text = "unknown", "还没有运行记录"
+        last_run_text = "配置好自选股后会自动开始盯盘"
+    else:
+        overall_cls = "error" if any_error else "ok"
+        overall_text = "部分数据源异常" if any_error else "数据源正常"
+        last_run_text = f"最近成功运行：{_ago(last_ok)}" if last_ok else "最近成功运行：暂无"
+
+    return (
+        "<section class='health-banner'>"
+        f"<div class='health-head'>"
+        f"<span class='health-status {overall_cls}'>{_e(overall_text)}</span>"
+        f"<span class='health-lastrun'>{_e(last_run_text)}</span></div>"
+        f"<div class='health-chips'>{''.join(chips)}</div>"
+        "</section>"
+    )
+
+
 def _feedback_buttons(source: str, code: str, source_id) -> str:
     buttons = []
     for label in ("有用", "误报", "看不懂"):
@@ -899,6 +981,59 @@ def _decision_cards(rows: list[dict]) -> str:
     return f"<section class='mobile-cards'><h2>今日提醒</h2><div class='decision-card-list'>{''.join(cards)}</div></section>"
 
 
+_WEB_ALERT_LEVELS = {
+    "critical": ("必看", "error"),
+    "warning": ("建议看", "warn"),
+    "info": ("记录", "info"),
+}
+
+
+def _intraday_alerts(rows: list[dict]) -> str:
+    """盘中提醒 feed：web 模式下 monitor 触发的盯价/卖压/重大消息。
+    feishu 模式下这张表为空，整段不渲染（避免空区块和误导）。"""
+    if not rows:
+        return ""
+    items = []
+    for row in rows:
+        label, cls = _WEB_ALERT_LEVELS.get(str(row.get("level") or "info"), ("记录", "info"))
+        name = row.get("name") or row.get("code") or ""
+        # body 是为飞书卡片写的行，带 **markdown** 加粗标记；网页里按纯文本渲染，去掉星号。
+        body = "<br>".join(
+            _e(line.replace("**", "")) for line in str(row.get("body") or "").split("\n") if line.strip()
+        )
+        items.append(
+            "<article class='alert-item'>"
+            "<div class='alert-head'>"
+            f"<span class='alert-level {cls}'>{_e(label)}</span>"
+            f"<span class='alert-cat'>{_e(row.get('category') or '提醒')}</span>"
+            f"<code>{_e(row.get('code'))}</code>"
+            f"<strong>{_e(name)}</strong>"
+            f"<time>{_e(_ago(row.get('created_at')))}</time>"
+            "</div>"
+            f"<div class='alert-body'>{body}</div>"
+            "</article>"
+        )
+    return (
+        "<section class='intraday-alerts'><h2>盘中提醒</h2>"
+        f"<div class='alert-list'>{''.join(items)}</div></section>"
+    )
+
+
+_RUN_STATUS_LABELS = {
+    "ok": ("正常", "ok"),
+    "partial": ("部分异常", "warn"),
+    "failed": ("失败", "error"),
+}
+
+
+def _run_status_cell(row: dict) -> str:
+    status = str(row.get("status") or "ok")
+    label, cls = _RUN_STATUS_LABELS.get(status, (status, "warn"))
+    error = row.get("error")
+    title_attr = f" title='{_e(error)}'" if error else ""
+    return f"<span class='run-status {cls}'{title_attr}>{_e(label)}</span>"
+
+
 def _runs_table(rows: list[dict]) -> str:
     body = "".join(
         "<tr>"
@@ -909,10 +1044,11 @@ def _runs_table(rows: list[dict]) -> str:
         f"<td>{_e(row.get('tokens_used'))}</td>"
         f"<td>{_e(row.get('pushed_count'))}</td>"
         f"<td>{'成功' if row.get('pushed_ok') else '-'}</td>"
+        f"<td>{_run_status_cell(row)}</td>"
         "</tr>"
         for row in rows
     )
-    return _table("运行记录", ["时间", "Run ID", "股票", "LLM", "Tokens", "推送", "状态"], body)
+    return _table("运行记录", ["时间", "Run ID", "股票", "LLM", "Tokens", "推送", "推送状态", "健康"], body)
 
 
 def _decisions_table(rows: list[dict]) -> str:
@@ -968,6 +1104,21 @@ def _alerts_table(rows: list[dict]) -> str:
     return _table("盯价提醒", ["代码", "名称", "触发价", "方向", "数量", "创建时间"], body)
 
 
+def _report_tuning_hint(by_action: dict) -> str:
+    """只在有足够样本且命中率确实偏低时，给一条数据驱动的调参建议——不臆测。"""
+    buy = by_action.get("BUY") or {}
+    count = int(buy.get("count") or 0)
+    hit_rate = buy.get("hit_rate")
+    if count >= 10 and hit_rate is not None and hit_rate < 0.45:
+        return (
+            "<p class='tuning-hint'>"
+            f"提示：近 5 日「机会观察」命中率仅 {hit_rate * 100:.0f}%（{count} 个样本）。"
+            "若嫌机会类提醒太吵，可在 <a href='/settings/features'>功能开关</a> 打开「必看模式」，"
+            "只保留止损 / 强风险这类必须看的提醒。</p>"
+        )
+    return ""
+
+
 def _report_table(report: dict) -> str:
     rows = report.get("by_action", {})
     body = "".join(
@@ -980,10 +1131,11 @@ def _report_table(report: dict) -> str:
         "</tr>"
         for action, stats in rows.items()
     )
-    return _table("5日提醒复盘", ["类型", "样本", "命中率", "平均收益", "中位收益"], body)
+    table = _table("5日提醒复盘", ["类型", "样本", "命中率", "平均收益", "中位收益"], body)
+    return table + _report_tuning_hint(rows)
 
 
-def _feedback_table(rows: list[dict]) -> str:
+def _feedback_table(rows: list[dict], muted: dict | None = None) -> str:
     body = "".join(
         "<tr>"
         f"<td>{_date(row.get('created_at'))}</td>"
@@ -993,7 +1145,15 @@ def _feedback_table(rows: list[dict]) -> str:
         "</tr>"
         for row in rows
     )
-    return _table("最近反馈", ["时间", "代码", "反馈", "来源"], body)
+    table = _table("最近反馈", ["时间", "代码", "反馈", "来源"], body)
+    if muted:
+        codes = "、".join(sorted(muted))
+        note = (
+            "<p class='tuning-hint'>已根据你的「误报」反馈，自动抑制这些个股的非必看提醒"
+            f"（止损/强风险仍会照常提醒）：{_e(codes)}</p>"
+        )
+        return table + note
+    return table
 
 
 def _table(title: str, headers: list[str], body: str) -> str:
@@ -1292,6 +1452,53 @@ def _layout(active: str, title: str, subtitle: str, content: str,
     .metric {{ padding: 13px 14px; min-height: 76px; }}
     .metric span {{ display: block; color: var(--muted); font-size: 12px; }}
     .metric strong {{ display: block; margin-top: 8px; font-size: 20px; font-weight: 650; }}
+    .health-banner {{
+      margin-bottom: 18px; padding: 14px 16px;
+      background: var(--panel); border: 1px solid var(--line);
+      border-radius: 10px; box-shadow: var(--shadow);
+    }}
+    .health-head {{ display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }}
+    .health-status {{ font-weight: 650; font-size: 14px; padding: 3px 10px; border-radius: 999px; }}
+    .health-status.ok {{ color: var(--green); background: #e8f6ef; }}
+    .health-status.error {{ color: var(--red); background: #fbeceb; }}
+    .health-status.unknown {{ color: var(--muted); background: #f0f0f3; }}
+    .health-lastrun {{ color: var(--muted); font-size: 13px; }}
+    .health-chips {{ display: flex; flex-wrap: wrap; gap: 8px; }}
+    .health-chip {{
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 5px 10px; border-radius: 8px; font-size: 13px;
+      border: 1px solid var(--line); background: var(--panel-soft);
+    }}
+    .health-chip em {{ color: var(--muted); font-style: normal; font-size: 12px; }}
+    .health-chip .dot {{ width: 8px; height: 8px; border-radius: 50%; background: #c7c7cc; }}
+    .health-chip.ok .dot {{ background: var(--green); }}
+    .health-chip.error .dot {{ background: var(--red); }}
+    .health-chip.error {{ border-color: #e6b7b0; }}
+    .run-status {{ font-size: 12px; padding: 2px 8px; border-radius: 999px; font-weight: 560; }}
+    .run-status.ok {{ color: var(--green); background: #e8f6ef; }}
+    .run-status.warn {{ color: var(--orange); background: #fbf1e0; }}
+    .run-status.error {{ color: var(--red); background: #fbeceb; }}
+    .alert-list {{ display: grid; gap: 10px; }}
+    .alert-item {{
+      padding: 12px 14px; border-radius: 12px;
+      background: var(--panel); border: 1px solid var(--line);
+    }}
+    .alert-head {{ display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }}
+    .alert-head strong {{ font-weight: 650; }}
+    .alert-head time {{ margin-left: auto; color: var(--muted); font-size: 12px; }}
+    .alert-cat {{ color: var(--muted); font-size: 12px; }}
+    .alert-level {{ font-size: 12px; padding: 2px 8px; border-radius: 999px; font-weight: 560; }}
+    .alert-level.info {{ color: var(--blue); background: #eaf3ff; }}
+    .alert-level.warn {{ color: var(--orange); background: #fbf1e0; }}
+    .alert-level.error {{ color: var(--red); background: #fbeceb; }}
+    .alert-body {{ margin-top: 6px; color: var(--muted); font-size: 13px; line-height: 1.55; }}
+    .tuning-hint {{
+      margin: 10px 0 0; padding: 10px 12px; font-size: 13px;
+      color: var(--orange); background: #fbf5e9;
+      border: 1px solid #ecd9b6; border-radius: 8px;
+    }}
+    .tuning-hint a {{ color: #0057d9; }}
+    .option-row.must-see {{ align-items: flex-start; gap: 8px; padding: 10px 12px; background: #f3f8ff; border: 1px solid #cfe0fb; border-radius: 8px; margin-bottom: 12px; }}
     section {{ margin-top: 22px; }}
     h2 {{ margin: 0 0 10px; font-size: 17px; letter-spacing: 0; }}
     h3 {{ margin: 0; font-size: 16px; letter-spacing: 0; }}
@@ -1727,13 +1934,15 @@ def _layout(active: str, title: str, subtitle: str, content: str,
 def render_home(data: dict, settings: dict[str, str], notice: str = "") -> str:
     content = f"""
     {_onboarding_panel(data, settings)}
+    {_health_banner(data)}
     <div class="metrics">{_summary_cards(data)}</div>
+    {_intraday_alerts(data.get('web_alerts', []))}
     {_decision_cards(data['decisions'])}
     {_report_table(data['report'])}
     {_decisions_table(data['decisions'])}
     {_positions_table(data['positions'])}
     {_alerts_table(data['price_alerts'])}
-    {_feedback_table(data['feedback'])}
+    {_feedback_table(data['feedback'], data.get('misreported'))}
     {_runs_table(data['runs'])}
     <footer>仅供研究复盘，不构成投资建议。数据来自本地 SQLite 记录。</footer>
     """
@@ -1930,22 +2139,34 @@ def render_model_settings(settings: dict[str, str], notice: str = "") -> str:
         </div>
         """)
 
+    ai_mode = settings.get("ENABLE_AI", "auto").strip().lower()
+    rule_mode = ai_mode in {"off", "false", "no", "n", "none", "rule", "0"}
+    on_checked = "" if rule_mode else " checked"
+    off_checked = " checked" if rule_mode else ""
     content = f"""
     <section class="panel">
-      <h2>推荐配置（点击自动填入）</h2>
-      <p style="margin:0 0 12px;color:var(--muted);font-size:13px;">选一个适合你的方案，填好 API Key 后点保存。</p>
-      <div class="preset-grid">{''.join(preset_cards)}</div>
-    </section>
-    <section class="panel" style="margin-top:16px">
-      <h2>手动配置</h2>
-      <form method="post" action="/settings/model">
-        <div class="form-grid">
+      <h2>AI 模式（三选一）</h2>
+      <p style="margin:0 0 12px;color:var(--muted);font-size:13px;">
+        家人零配置就想用？选「规则模式」。想要 AI 解读？选「开启 AI」，再从下面挑「本地 Ollama（免费）」或「远程 API」。</p>
+      <form method="post" action="/settings/model" id="model-form">
+        <div class="options">
+          <label class="option-row"><input type="radio" name="enable_ai" value="on"{on_checked}>
+            <span><b>开启 AI 分析</b> —— 会生成「机会观察」类 AI 解读，从下面选本地或远程模型</span></label>
+          <label class="option-row"><input type="radio" name="enable_ai" value="off"{off_checked}>
+            <span><b>规则模式（跳过 AI）</b> —— 不配任何模型也能跑，只做止损 / 盯价 / 公告 / 持仓提醒，家人最省心</span></label>
+        </div>
+        <div class="group-title">开启 AI 后，选一个方案（点击自动填入下方）</div>
+        <div class="preset-grid">{''.join(preset_cards)}</div>
+        <div class="form-grid" style="margin-top:12px">
           {_field("模型提供商", provider_select)}
           {_field("模型代号", f"<input id='f-model' name='llm_model' value='{_e(settings.get('LLM_MODEL', ''))}' placeholder='MiniMax-M2.7'>")}
           {_field("接口地址", f"<input id='f-base-url' name='llm_base_url' value='{_e(settings.get('LLM_BASE_URL', ''))}' placeholder='https://api.example.com/v1'>", "Anthropic 可用 https://api.anthropic.com；本地模型可用 http://127.0.0.1:11434/v1")}
           {_field("API Key", f"<input id='f-api-key' type='password' name='llm_api_key' placeholder='留空不修改，当前：{_e(_mask_secret(settings.get('LLM_API_KEY', '')))}'>", "本地 OpenAI-compatible 服务通常可以留空")}
         </div>
-        {_save_button()}
+        <div class="model-actions">
+          {_save_button()}
+          <button type="submit" formaction="/settings/model/test" class="secondary">保存并测试连接</button>
+        </div>
       </form>
     </section>
     <style>
@@ -1959,6 +2180,8 @@ def render_model_settings(settings: dict[str, str], notice: str = "") -> str:
     .preset-install{{font-size:11px;color:var(--muted)}}
     .preset-install a{{color:var(--blue)}}
     .preset-install code{{background:var(--panel-soft);padding:1px 4px;border-radius:3px;font-size:11px}}
+    .model-actions{{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:12px}}
+    .model-actions button.secondary{{background:var(--panel);color:var(--text);border:1px solid var(--line)}}
     </style>
     <script>
     function applyPreset(provider, baseUrl, model) {{
@@ -1968,6 +2191,8 @@ def render_model_settings(settings: dict[str, str], notice: str = "") -> str:
       if (bu) bu.value = baseUrl;
       var m = document.getElementById('f-model');
       if (m) m.value = model;
+      var onRadio = document.querySelector('input[name="enable_ai"][value="on"]');
+      if (onRadio) onRadio.checked = true;
       document.getElementById('f-api-key').placeholder = '请在此输入该服务的 API Key';
       document.getElementById('f-api-key').focus();
     }}
@@ -2057,10 +2282,13 @@ def render_feature_settings(settings: dict[str, str], notice: str = "") -> str:
         checked = " checked" if value in levels else ""
         return f"<label class='option-row'><input type='checkbox' name='alert_levels' value='{value}'{checked}>{_e(label)}</label>"
 
+    must_see = _checked(settings.get("MUST_SEE_MODE", "false"))
     content = f"""
     <section class="panel">
       <h2>功能开关</h2>
       <form method="post" action="/settings/features">
+        <label class="option-row must-see"><input type="checkbox" name="must_see_mode" value="true"{must_see}>
+          <span><b>必看模式</b>（宁可漏、不要烦）：只推必须看的（止损/强风险/重大负面），并自动抬高置信度门槛。打开后下面的分级与最低置信度会被它覆盖。</span></label>
         <div class="group-title">异动提醒分级</div>
         <div class="options">
           {level_checkbox("critical", "必须看：止损、强风险、重大负面")}
@@ -2265,6 +2493,9 @@ def _updates_for_route(route: str, params: dict[str, list[str]]) -> dict[str, st
             "LLM_BASE_URL": _first(params, "llm_base_url"),
             "LLM_MODEL": _first(params, "llm_model"),
         }
+        enable_ai = _first(params, "enable_ai").strip().lower()
+        if enable_ai in {"on", "off"}:
+            updates["ENABLE_AI"] = enable_ai
         api_key = _first(params, "llm_api_key").strip()
         if api_key:
             updates["LLM_API_KEY"] = api_key
@@ -2310,6 +2541,7 @@ def _updates_for_route(route: str, params: dict[str, list[str]]) -> dict[str, st
         levels = [item for item in params.get("alert_levels", []) if item in {"critical", "warning", "info"}]
         return {
             "ALERT_LEVELS": ",".join(levels or ["critical"]),
+            "MUST_SEE_MODE": _bool_param(params, "must_see_mode"),
             "ENABLE_REASSURANCE_MODE": _bool_param(params, "enable_reassurance_mode"),
             "ENABLE_AFTER_CLOSE_SUMMARY": _bool_param(params, "enable_after_close_summary"),
             "ENABLE_FAMILY_BRIEF": _bool_param(params, "enable_family_brief"),
@@ -2425,6 +2657,20 @@ def icon_svg() -> bytes:
 <path d="M24 84h18l13-30 19 44 16-34h14" fill="none" stroke="#6ee7b7" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
 <circle cx="92" cy="38" r="10" fill="#0a84ff"/>
 </svg>"""
+
+
+def _test_llm_connection() -> str:
+    """测试当前（已保存的）LLM 配置是否可连。规则模式直接返回说明，不报错。"""
+    cfg = get_config()
+    if not cfg.ai_enabled:
+        return "当前为规则模式（未启用 AI），无需测试 LLM。止损 / 盯价 / 公告 / 持仓提醒照常运行。"
+    try:
+        from utils.llm import get_llm_client
+        client = get_llm_client()
+        client.chat([{"role": "user", "content": "reply OK"}], max_tokens=8)
+        return f"✅ LLM 连接成功：{cfg.llm_provider} / {cfg.llm_model}"
+    except Exception as exc:
+        return f"❌ LLM 连接失败：{str(exc)[:200]}"
 
 
 def _record_feedback(params: dict[str, list[str]], storage: Storage) -> str:
@@ -2556,6 +2802,7 @@ def make_handler(storage: Storage):
                 "/feedback",
                 "/settings/watchlist",
                 "/settings/model",
+                "/settings/model/test",
                 "/settings/channels",
                 "/settings/remote",
                 "/settings/features",
@@ -2603,6 +2850,12 @@ def make_handler(storage: Storage):
                 except ValueError as exc:
                     notice = str(exc)
                 body = _render_route("/settings/factors", storage, notice).encode("utf-8")
+                self._send_bytes(body, "text/html; charset=utf-8")
+                return
+            if route == "/settings/model/test":
+                save_settings(_updates_for_route("/settings/model", params))
+                notice = _test_llm_connection()
+                body = _render_route("/settings/model", storage, notice).encode("utf-8")
                 self._send_bytes(body, "text/html; charset=utf-8")
                 return
             updates = _updates_for_route(route, params)

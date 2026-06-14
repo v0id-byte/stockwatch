@@ -5,8 +5,30 @@ from datetime import datetime, timedelta
 
 from loguru import logger
 
+from config import get_config
 from core.runner import once, _setup_log
 from core.monitor import monitor_once, _is_intraday_monitor_time
+
+
+def _resolve_and_calibrate():
+    """结算到期决策（写回 decisions.success），让信号复盘/置信度校准的数据真正闭环。
+    幂等且廉价：规则模式下没有 BUY/SELL 决策时几乎零开销。结算不需要 sklearn；
+    仅当开启 ENABLE_CALIBRATION 且本机装了训练依赖时才顺带重训校准模型。"""
+    from utils.storage import Storage
+    from analysis.calibration import resolve_decisions
+
+    cfg = get_config()
+    storage = Storage()
+    resolved = resolve_decisions(storage, cfg.calibration_lookback_days)
+    if resolved:
+        logger.info(f"决策结算：本轮结算 {resolved} 条 BUY/SELL")
+    if cfg.enable_calibration:
+        try:
+            from scripts.train_calibration import train_action
+            train_action(storage, "BUY", cfg.calibration_min_samples)
+            train_action(storage, "SELL", cfg.calibration_min_samples)
+        except Exception as e:  # 缺 sklearn 等训练依赖时静默跳过，不影响盯盘
+            logger.info(f"置信度校准重训跳过（通常是未装训练依赖）：{e}")
 
 
 def daemon():
@@ -22,6 +44,10 @@ def daemon():
             once()
         except Exception as e:
             logger.error(f"运行异常: {e}")
+        try:
+            _resolve_and_calibrate()
+        except Exception as e:
+            logger.warning(f"决策结算异常，跳过: {e}")
         _schedule_next_full(scheduler)
 
     def _run_monitor():

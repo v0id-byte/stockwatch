@@ -46,7 +46,10 @@ class Config:
                 "FEISHU_APP_SECRET",
                 "FEISHU_RECEIVE_ID",
             ])
-        if not self.llm_api_key and not self.llm_allows_empty_key:
+        # 只有当用户「显式」要求开启 AI 却没给凭证时才报错。
+        # 默认 ENABLE_AI=auto：没配 LLM 就自动进入规则模式（止损/盯价/公告照常跑），
+        # 不再因为缺 LLM_API_KEY 而启动失败——这是家用「装一次、只看网页」的关键。
+        if self.ai_enabled and not self.llm_api_key and not self.llm_allows_empty_key:
             required.append("LLM_API_KEY")
         missing = [k for k in required if not os.getenv(k)]
         if missing:
@@ -100,6 +103,21 @@ class Config:
         local_hosts = ("http://localhost", "http://127.0.0.1", "http://0.0.0.0")
         openai_like = {"openai", "openai-compatible", "custom", "local", "minimax"}
         return self.llm_provider in openai_like and host.startswith(local_hosts)
+
+    @property
+    def ai_enabled(self) -> bool:
+        """是否启用 AI（LLM）分析。
+        ENABLE_AI = on/off/auto（默认 auto）。
+        - on：强制启用（缺凭证会在 _validate 报错，提醒用户去配）。
+        - off / none / rule：规则模式——完全不调用 LLM，只跑止损/盯价/公告/持仓提醒。
+        - auto：配了 LLM_API_KEY，或 base_url 指向本地服务（Ollama 等），才算启用；
+                否则自动降级为规则模式。家用「装一次只看网页」默认走这里。"""
+        raw = os.getenv("ENABLE_AI", "auto").strip().lower()
+        if raw in {"1", "true", "yes", "y", "on"}:
+            return True
+        if raw in {"0", "false", "no", "n", "off", "none", "rule"}:
+            return False
+        return bool(self.llm_api_key) or self.llm_allows_empty_key
 
     @property
     def llm_api_key_or_placeholder(self) -> str:
@@ -190,8 +208,19 @@ class Config:
         return int(os.getenv("MAX_STOCKS_PER_RUN", "50"))
 
     @property
+    def must_see_mode(self) -> bool:
+        """必看模式：一键把提醒收紧到"宁可漏、不要烦"。
+        打开后只推 critical（止损/强风险/重大负面），并抬高置信度门槛。
+        相当于同时设 ALERT_LEVELS=critical + 提高 MIN_CONFIDENCE_TO_PUSH，
+        但用户只需拨一个开关。"""
+        return _env_bool("MUST_SEE_MODE", False)
+
+    MUST_SEE_CONFIDENCE_FLOOR = 0.72
+
+    @property
     def min_confidence_to_push(self) -> float:
-        return float(os.getenv("MIN_CONFIDENCE_TO_PUSH", "0.6"))
+        base = float(os.getenv("MIN_CONFIDENCE_TO_PUSH", "0.6"))
+        return max(base, self.MUST_SEE_CONFIDENCE_FLOOR) if self.must_see_mode else base
 
     @property
     def stop_loss_fallback_pct(self) -> float:
@@ -211,6 +240,8 @@ class Config:
 
     @property
     def alert_levels(self) -> set[str]:
+        if self.must_see_mode:
+            return {"critical"}
         raw = os.getenv("ALERT_LEVELS", "critical,warning,info").strip().lower()
         if raw in {"", "all"}:
             return {"critical", "warning", "info"}

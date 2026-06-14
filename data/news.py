@@ -1,9 +1,12 @@
 """新闻 + 公告 + 财联社电报"""
 import hashlib
+import time
 from datetime import datetime, timedelta
 from loguru import logger
 
 import akshare as ak
+
+from utils.health import record_source_health
 
 
 class NewsData:
@@ -16,6 +19,7 @@ class NewsData:
         """获取近 days 天个股新闻"""
         results = []
         cutoff = datetime.now() - timedelta(days=days)
+        started = time.perf_counter()
         try:
             df = ak.stock_news_em(symbol=code)
             for _, row in df.iterrows():
@@ -33,6 +37,9 @@ class NewsData:
                 })
         except Exception as e:
             logger.warning(f"东财新闻获取失败 {code}: {e}")
+            record_source_health("新闻", False, (time.perf_counter() - started) * 1000, str(e))
+        else:
+            record_source_health("新闻", True, (time.perf_counter() - started) * 1000, None, len(results))
 
         # 去重
         seen = set()
