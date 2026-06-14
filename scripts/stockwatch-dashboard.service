@@ -1,0 +1,20 @@
+[Unit]
+Description=StockWatch Web Dashboard
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__STOCKWATCH_USER__
+WorkingDirectory=__STOCKWATCH_HOME__/stockwatch
+Environment="PATH=__STOCKWATCH_HOME__/stockwatch/.venv/bin"
+Environment="PYTHONPATH=__STOCKWATCH_HOME__/stockwatch"
+Environment="STOCKWATCH_SKIP_REQUIRED_CONFIG=1"
+ExecStart=__STOCKWATCH_HOME__/stockwatch/.venv/bin/python __STOCKWATCH_HOME__/stockwatch/main.py dashboard --host 0.0.0.0 --port 8765
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:__STOCKWATCH_HOME__/.stockwatch/logs/dashboard.log
+StandardError=append:__STOCKWATCH_HOME__/.stockwatch/logs/dashboard.log
+
+[Install]
+WantedBy=multi-user.target

@@ -64,6 +64,17 @@ if [ -f "$BOT_SERVICE_FILE" ]; then
     sudo systemctl enable stockwatch-bot
     echo "  飞书机器人服务已 enable"
 fi
+DASHBOARD_SERVICE_FILE="$WORKDIR/scripts/stockwatch-dashboard.service"
+if [ -f "$DASHBOARD_SERVICE_FILE" ]; then
+    ACTUAL_USER="$(whoami)"
+    DASHBOARD_SERVICE_TMP="$(mktemp)"
+    sed "s|__STOCKWATCH_HOME__|$HOME|g; s|__STOCKWATCH_USER__|$ACTUAL_USER|g" "$DASHBOARD_SERVICE_FILE" > "$DASHBOARD_SERVICE_TMP"
+    sudo cp "$DASHBOARD_SERVICE_TMP" /etc/systemd/system/stockwatch-dashboard.service
+    rm -f "$DASHBOARD_SERVICE_TMP"
+    sudo systemctl daemon-reload
+    sudo systemctl enable stockwatch-dashboard
+    echo "  Web 控制台服务已 enable（端口 8765）"
+fi
 
 # ---- 每周校准任务 ----
 if [ -f "$WORKDIR/scripts/train_calibration.py" ]; then
