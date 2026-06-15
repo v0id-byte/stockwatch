@@ -10,15 +10,81 @@ References:
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from loguru import logger
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _metric(meta: dict, *path):
+    current = meta
+    for key in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
+def _as_float(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number
+
+
+def evaluate_model_health(meta: dict) -> dict:
+    """Return production-readiness from the model's true OOS ranking metrics."""
+    min_return_ic = _env_float("STOCKWATCH_LGBM_MIN_TEST_RETURN_IC", 0.0)
+    min_decile_spread = _env_float("STOCKWATCH_LGBM_MIN_TEST_DECILE_SPREAD", 0.0)
+    return_ic = _as_float(_metric(meta, "test_metrics", "return_spearman_ic"))
+    decile_spread = _as_float(_metric(meta, "test_metrics", "decile_returns", "spread_9_minus_0"))
+    failures = []
+    if return_ic is not None and return_ic < min_return_ic:
+        failures.append(f"test return IC {return_ic:.4f} < {min_return_ic:.4f}")
+    if decile_spread is not None and decile_spread < min_decile_spread:
+        failures.append(f"test decile spread {decile_spread:.4f} < {min_decile_spread:.4f}")
+    explicit = str(meta.get("validation_status") or "").strip().upper()
+    if explicit in {"FAIL", "FAILED", "UNVALIDATED"} and not failures:
+        failures.extend(str(item) for item in meta.get("validation_failures") or ["validation_status=UNVALIDATED"])
+    if failures:
+        status = "UNVALIDATED"
+    elif return_ic is None and decile_spread is None:
+        status = "UNKNOWN"
+    else:
+        status = "VALIDATED"
+    return {
+        "status": status,
+        "failures": failures,
+        "return_spearman_ic": return_ic,
+        "decile_spread_9_minus_0": decile_spread,
+        "thresholds": {
+            "min_test_return_ic": min_return_ic,
+            "min_test_decile_spread": min_decile_spread,
+        },
+    }
 
 
 class LgbmRanker:
     def __init__(self, model_path: Path):
         self.model = None
         self.meta = {"features": []}
+        self.model_health = {"status": "UNKNOWN", "failures": []}
+        self.disabled_context = ""
         self.model_path = model_path
         if not model_path.exists():
             logger.info("LightGBM 模型未加载，跳过")
@@ -37,10 +103,20 @@ class LgbmRanker:
                     self.meta = json.load(f)
             else:
                 self.meta = {"features": self.model.feature_name()}
+            self.model_health = evaluate_model_health(self.meta)
+            if self.model_health["status"] == "UNVALIDATED" and not _env_bool("STOCKWATCH_LGBM_ALLOW_UNVALIDATED", False):
+                reason = "；".join(self.model_health["failures"])
+                self.disabled_context = f"LightGBM 排序模型预测: 未通过样本外验证，跳过（{reason}）"
+                logger.warning(f"LightGBM 模型未通过样本外验证，禁用推理: {reason}")
+                self.model = None
+                return
             logger.info(f"LightGBM 模型已加载: {model_path}")
         except Exception as e:
             logger.warning(f"LightGBM 模型加载失败: {e}")
             self.model = None
+
+    def unavailable_context(self) -> str:
+        return self.disabled_context or "LightGBM 排序模型预测: 未加载，跳过"
 
     def _needs_rank_normalize(self) -> bool:
         return self.meta.get("feature_normalization") == "cross_sectional_rank_pct_centered"
@@ -76,10 +152,11 @@ class LgbmRanker:
         return self.predict_batch({"_": factors_dict}).get("_")
 
 
-def format_lgbm_context(scores_by_code: dict[str, float | None]) -> dict[str, str]:
+def format_lgbm_context(scores_by_code: dict[str, float | None],
+                        unavailable_text: str = "LightGBM 排序模型预测: 未加载，跳过") -> dict[str, str]:
     valid = {code: score for code, score in scores_by_code.items() if score is not None}
     if not valid:
-        return {code: "LightGBM 排序模型预测: 未加载，跳过" for code in scores_by_code}
+        return {code: unavailable_text for code in scores_by_code}
     if len(valid) == 1:
         code, score = next(iter(valid.items()))
         contexts = {
@@ -87,7 +164,7 @@ def format_lgbm_context(scores_by_code: dict[str, float | None]) -> dict[str, st
         }
         for item_code, item_score in scores_by_code.items():
             if item_score is None:
-                contexts[item_code] = "LightGBM 排序模型预测: 未加载，跳过"
+                contexts[item_code] = unavailable_text
         return contexts
 
     ordered = sorted(valid.items(), key=lambda item: item[1])
@@ -103,5 +180,5 @@ def format_lgbm_context(scores_by_code: dict[str, float | None]) -> dict[str, st
         )
     for code, score in scores_by_code.items():
         if score is None:
-            contexts[code] = "LightGBM 排序模型预测: 未加载，跳过"
+            contexts[code] = unavailable_text
     return contexts

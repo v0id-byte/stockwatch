@@ -218,7 +218,10 @@ class BotService:
             if self.cfg.enable_lgbm:
                 from analysis.lgbm import LgbmRanker, format_lgbm_context
                 ranker = LgbmRanker(self.cfg.lgbm_model_path)
-                lgbm_context = format_lgbm_context({code: ranker.predict(factors)}).get(code, "")
+                lgbm_context = format_lgbm_context(
+                    {code: ranker.predict(factors)},
+                    unavailable_text=ranker.unavailable_context(),
+                ).get(code, "")
             return alpha_summary, lgbm_context
         except Exception as e:
             logger.warning(f"即时查询因子上下文失败 {code}: {e}")

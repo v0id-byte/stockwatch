@@ -26,6 +26,7 @@ PROPAGATION_FEATURES = [
 DEFAULT_LEADER_RETURN = 0.04
 DEFAULT_LEADER_VOLZ = 1.0
 DEFAULT_UNDERREACTION_CEIL = 0.025
+DEFAULT_CHASED_PENALTY = 0.35
 DEFAULT_MIN_CORR = 0.15
 DEFAULT_LOOKBACK = 60
 DEFAULT_MAX_LEADERS = 8
@@ -37,6 +38,23 @@ def _as_float(value, default: float = 0.0) -> float:
         return num if np.isfinite(num) else default
     except (TypeError, ValueError):
         return default
+
+
+def _chased_multiplier(candidate_ret, threshold: float = DEFAULT_UNDERREACTION_CEIL,
+                       penalty: float = DEFAULT_CHASED_PENALTY):
+    """Return penalty multiplier for 'chased' candidates.
+
+    A candidate is considered chased if its same-day return exceeds threshold,
+    suggesting it may already have reacted to the leader. The penalty down-weights
+    such candidates to reduce train-serve skew between offline batch and online
+    streaming paths.
+    """
+    try:
+        # Vectorized path for pandas Series / numpy arrays
+        return np.where(candidate_ret > threshold, penalty, 1.0)
+    except TypeError:
+        # Scalar fallback
+        return penalty if candidate_ret > threshold else 1.0
 
 
 def _empty_feature_row() -> dict[str, float]:
@@ -223,8 +241,8 @@ def compute_propagation_feature_frame(df: pd.DataFrame,
 
         candidate_ret = ret1.loc[trade_date].fillna(0.0)
         underreaction = (best_ret - candidate_ret).clip(lower=0.0)
-        not_chased = (candidate_ret <= underreaction_ceiling).astype(float)
-        prop_score = best_score * (1 + underreaction.clip(upper=0.12)) * not_chased
+        chased_mult = _chased_multiplier(candidate_ret, underreaction_ceiling)
+        prop_score = best_score * (1 + underreaction.clip(upper=0.12)) * chased_mult
 
         for code in codes:
             rows.append({
@@ -301,8 +319,8 @@ def compute_latest_propagation_features(codes: list[str], quotes: dict[str, dict
             leader_volz = _latest_volume_z(kline_by_code.get(leader_code, []))
             relation_weight = corr * max(0.0, leader_ret) * (1 + max(0.0, leader_volz))
             underreaction = max(0.0, leader_ret - candidate_ret)
-            chased_penalty = 0.35 if candidate_ret > DEFAULT_UNDERREACTION_CEIL else 1.0
-            score = relation_weight * (1 + min(0.12, underreaction)) * chased_penalty
+            chased_mult = _chased_multiplier(candidate_ret, DEFAULT_UNDERREACTION_CEIL)
+            score = relation_weight * (1 + min(0.12, underreaction)) * chased_mult
             if score > best["prop_score"]:
                 best = {
                     "prop_leader_ret_1d": leader_ret,

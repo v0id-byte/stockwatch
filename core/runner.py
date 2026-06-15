@@ -362,7 +362,7 @@ def once():
             scores = ranker.predict_batch(eligible)
             for code in factor_map:
                 scores.setdefault(code, None)
-            lgbm_contexts = format_lgbm_context(scores)
+            lgbm_contexts = format_lgbm_context(scores, unavailable_text=ranker.unavailable_context())
         except Exception as e:
             logger.warning(f"LightGBM 推理失败，跳过: {e}")
     if propagation_contexts:

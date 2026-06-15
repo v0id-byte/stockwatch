@@ -2,12 +2,20 @@
 from __future__ import annotations
 
 import math
+import os
 from datetime import datetime, timedelta
 
 from loguru import logger
 
 from config import get_config
 from utils.storage import Storage
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 def sigmoid(value: float) -> float:
@@ -74,13 +82,26 @@ def _resolve_one(storage: Storage, decision: dict, lookback_days: int) -> int | 
     target = float(decision.get("target_price") or 0)
     stop = float(decision.get("stop_loss") or 0)
     action = decision["action"]
+    use_llm_targets = _env_bool("CALIBRATION_USE_LLM_TARGETS", False)
 
     if action == "BUY":
-        success = (target > 0 and max_high >= target) or end_close > current * 1.03
-        fail = (stop > 0 and min_low <= stop) or end_close < current * 0.98
+        if use_llm_targets and target > 0:
+            success = max_high >= target or end_close > current * 1.03
+        else:
+            success = end_close > current * 1.03
+        if use_llm_targets and stop > 0:
+            fail = min_low <= stop or end_close < current * 0.98
+        else:
+            fail = end_close < current * 0.98
     elif action == "SELL":
-        success = (target > 0 and min_low <= target) or end_close < current * 0.98
-        fail = (stop > 0 and max_high >= stop) or end_close > current * 1.03
+        if use_llm_targets and target > 0:
+            success = min_low <= target or end_close < current * 0.98
+        else:
+            success = end_close < current * 0.98
+        if use_llm_targets and stop > 0:
+            fail = max_high >= stop or end_close > current * 1.03
+        else:
+            fail = end_close > current * 1.03
     else:
         return None
 

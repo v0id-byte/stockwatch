@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from analysis.factors import ALPHA158_FEATURES, ROBUST_FEATURES, BEAR_FEATURES, BULL_FEATURES
+from analysis.lgbm import evaluate_model_health
 from analysis.propagation import PROPAGATION_FEATURES
 from analysis.regime import is_bull_trend
 
@@ -414,6 +415,7 @@ def main():
     test_metrics = _evaluate_split(test, test_pred, return_col, label_horizon)
     full_pred = model.predict(df[feature_names], num_iteration=model.best_iteration)
     per_year_ic = _per_year_ic(df, full_pred, return_col)
+    per_year_ic_test_only = _per_year_ic(test, test_pred, return_col)
     out_dir = ROOT / "models"
     out_dir.mkdir(exist_ok=True)
     suffix = "" if regime == "all" else f"_{regime}"
@@ -445,11 +447,13 @@ def main():
         "validation_metrics": validation_metrics,
         "test_metrics": test_metrics,
         "per_year_ic": per_year_ic,
+        "per_year_ic_test_only": per_year_ic_test_only,
         "per_year_ic_note": (
-            "逐年横截面 IC（含样本内年份）。train 截止 "
-            + split["train_end_exclusive"]
+            "per_year_ic 含样本内年份（全量预测，偏乐观）；"
+            "per_year_ic_test_only 仅含 test set 年份（真样本外）。"
+            "train 截止 " + split["train_end_exclusive"]
             + "，test 起始 " + split["test_start"]
-            + "；其后年份为样本外。IC 逐年为正说明排序方向稳定。"
+            + "；其后年份为样本外。用于判断排序方向是否稳定。"
         ),
         "best_iteration": model.best_iteration,
         "split": split,
@@ -467,11 +471,16 @@ def main():
             for name, gain in importance[:30]
         ],
     }
+    health = evaluate_model_health(meta)
+    meta["validation_status"] = health["status"]
+    meta["validation_failures"] = health["failures"]
+    meta["validation_thresholds"] = health["thresholds"]
     with open(out_dir / f"lgbm{suffix}_meta.json", "w") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
     print(f"model saved: {model_path}")
     print(f"validation={_summary(validation_metrics)}")
     print(f"test={_summary(test_metrics)}")
+    print(f"validation_status={health['status']} failures={health['failures']}")
 
 
 if __name__ == "__main__":

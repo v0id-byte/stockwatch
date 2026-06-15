@@ -187,6 +187,29 @@ class TestEventLayer:
 
 
 class TestSecondReviewFixes:
+    def test_lgbm_health_rejects_negative_oos_metrics(self):
+        from analysis.lgbm import evaluate_model_health
+
+        meta = {
+            "test_metrics": {
+                "return_spearman_ic": -0.001,
+                "decile_returns": {"spread_9_minus_0": -0.02},
+            }
+        }
+        health = evaluate_model_health(meta)
+        assert health["status"] == "UNVALIDATED"
+        assert any("return IC" in item for item in health["failures"])
+        assert any("decile spread" in item for item in health["failures"])
+
+    def test_lgbm_context_can_explain_unvalidated_model(self):
+        from analysis.lgbm import format_lgbm_context
+
+        out = format_lgbm_context(
+            {"000001": None},
+            unavailable_text="LightGBM 排序模型预测: 未通过样本外验证，跳过",
+        )
+        assert "未通过样本外验证" in out["000001"]
+
     def test_lgbm_uses_model_specific_meta_path(self, tmp_path, monkeypatch):
         import json
         import types

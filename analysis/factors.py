@@ -35,16 +35,16 @@ ALPHA158_FEATURES = (
     + [f"{name}{window}" for window in WINDOWS for name in ROLLING_FEATURES]
 )
 
-# Sign-stable cross-sectional alpha factors, selected by their forward-return IC
-# being the SAME sign and non-trivial magnitude in BOTH the 2022-2024 bear and
-# the 2025-2026 bull regimes (see scripts/backtest_strategy.py). Three diversified
-# families that survive regime changes in A-shares:
+# Conservative cross-sectional alpha candidate set. These factors are deliberately
+# kept small and interpretable, but the trained model must still pass the
+# lgbm_meta.json health gate before production inference uses it. Three families
+# represented here:
 #   - short/medium reversal:        RET/RELV/ROC/RESI/CORD
 #   - oversold price position:      QTLD/QTLU/MA/IMIN
 #   - low turnover / low attention: TURN/VOLZ/AMTMA/VMA/VSUMN/WVMA
-# Pure illiquidity (ILLIQ) and long-horizon volatility/beta/R2 (STD/BETA/RSQR) are
-# deliberately EXCLUDED: their IC sign flips across regimes, which is what made the
-# previous "stable" model post a negative out-of-sample IC.
+# Pure illiquidity (ILLIQ) and long-horizon volatility/beta/R2 (STD/BETA/RSQR)
+# remain excluded from the default set; broader variants are available through
+# STOCKWATCH_LGBM_FEATURE_SET=stable/all for research comparisons.
 ROBUST_FEATURES = [
     "RET20", "RET30", "RET60", "RELV20", "RELV30", "RELV60", "ROC20", "ROC30", "ROC60",
     "QTLD20", "QTLD30", "QTLD60", "QTLU60", "QTLU120", "MA20", "MA30", "MA60", "IMIN30",

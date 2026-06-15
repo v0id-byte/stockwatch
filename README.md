@@ -523,11 +523,11 @@ python scripts/train_lgbm.py
 scp models/lgbm.* <user>@<host>:~/.stockwatch/models/
 ```
 
-部署端只在 `ENABLE_LGBM=true` 时加载模型；模型缺失会记录日志并跳过。
+部署端只在 `ENABLE_LGBM=true` 时加载模型；模型缺失会记录日志并跳过。模型加载还会读取 `lgbm_meta.json` 的真样本外健康检查：若 `test return IC < 0` 或 `decile 9-0 spread < 0`，线上推理会拒绝输出 LightGBM 排序分，避免把失败模型喂给决策引擎。研究调试时可临时设 `STOCKWATCH_LGBM_ALLOW_UNVALIDATED=true` 覆盖该门禁。
 训练脚本会按标签周期在 train/validation/test 边界做 purge，避免 20 日前瞻标签跨边界泄漏。
 `lgbm_meta.json` 里的 top-k 收益是逐交易日的前瞻收益均值，不是账户累计收益；同时会输出 IC、return-IC、十分位收益、非重叠抽样诊断，以及**逐年横截面 IC**（`per_year_ic`）。
 
-**模型构建方式（v2.1 起）**：默认特征集为 `robust`，只保留在 2022–2024 与 2025–2026 两段行情里 IC 同号、方向稳定的因子，分三类——短/中期反转（RET/RELV/ROC）、超跌位置（QTLD/QTLU/MA/IMIN）、低换手低关注（TURN/VOLZ/AMTMA/VMA）。**刻意剔除**纯流动性（ILLIQ）和长周期波动/Beta/R²（STD/BETA/RSQR）——它们 IC 符号会随行情翻转，正是旧模型样本外 IC 为负的根因。训练前对每个交易日做**横截面分位归一化**（去掉随时间漂移的因子量纲），目标改为对该归一化排序做**回归**（直接优化 IC）。线上推理在 `analysis/lgbm.py` 里用同样的横截面归一化对当前股票池打分，并对历史不足的次新股跳过，保证训练/线上一致。
+**模型构建方式（v2.1 起）**：默认特征集为 `robust`，分三类——短/中期反转（RET/RELV/ROC）、超跌位置（QTLD/QTLU/MA/IMIN）、低换手低关注（TURN/VOLZ/AMTMA/VMA）。训练前对每个交易日做**横截面分位归一化**（去掉随时间漂移的因子量纲），目标为横截面排序标签回归。线上推理在 `analysis/lgbm.py` 里用同样的横截面归一化对当前股票池打分，并对历史不足的次新股跳过，保证训练/线上一致。注意：最近一次 2025-11-17 之后的真样本外复核显示，当前 `robust` / `all` / `stable` 快照的 return IC 或 decile spread 仍为负，均会被标记为 **UNVALIDATED**；在重建出通过健康门禁的新模型前，LightGBM 只能作为研究产物，不应进入实盘决策。
 
 回到全量或旧版因子子集训练（用于对比）：
 
@@ -535,6 +535,8 @@ scp models/lgbm.* <user>@<host>:~/.stockwatch/models/
 STOCKWATCH_LGBM_FEATURE_SET=all python scripts/train_lgbm.py     # 全部 Alpha158
 STOCKWATCH_LGBM_FEATURE_SET=stable python scripts/train_lgbm.py  # 旧版子集（含不稳定风险因子）
 ```
+
+这两个口径都会包含 `PROPAGATION_FEATURES`；它们适合做对照实验，但必须以 `validation_status=VALIDATED` 为准，不能只看样本内或单一 top-k CAGR。
 
 #### 牛熊分模型（`MARKET_REGIME`，v2.2 起）
 
@@ -624,9 +626,9 @@ python main.py backtest --signal regime --bear-exposure 0.5   # 年线下只用�
 
 基本面因子（价值/质量/低波）也单独验证过：A 股上**原始 IC 偏负、行业中性化后也只有 ~+0.01**，质量筛不降回撤——印证了 A 股长期"炒小炒差"、对质量/价值定价不充分的现实。所以没有为它新建大流水线（只有 `ocf_to_eps` 经营现金流质量在熊市有 ~+0.024 的微弱增益，作为未来熊市模型的可选分散项备查）。
 
-**本地历史（2022-01 ~ 2026-05，约 1473 只）上的实测**（仅研究复盘，非收益承诺）：重建后的模型**逐年横截面 IC 均为正**（2022 +0.09、2023 +0.08、2024 +0.10、2025 +0.05、2026YTD +0.03），而旧 `stable` 模型样本外 IC 为 **−0.024**（方向反了）。样本外（2025 起）top50 多头组合年化约 +11%、Sharpe≈0.65、最大回撤≈-8%，稳定高于无风险（约 2%），并在 2022 熊市跑赢 CSI300。
+**本地历史（2022-01 ~ 2026-05）上的最新复核**（仅研究复盘，非收益承诺）：按真样本外起点对齐后，当前 `robust`、`all`、`stable` 三个 LightGBM 快照的 return IC 或 decile spread 仍为负，说明它们不是可上线模型。系统会把这类模型标为 **UNVALIDATED** 并在线上跳过；后续模型必须先通过 `lgbm_meta.json` 健康门禁，再谈部署。
 
-> 诚实边界：这是**长多、相对收益**的横截面信号，仍是股票 beta——熊市会有回撤（2022 段约 -16%）。截面 alpha 量级温和（IC≈0.05–0.10），2026 的强动量行情对反转/超跌类因子是逆风。它不构成「永远跑赢无风险、低波动」的绝对收益承诺，也不连接券商、不下单。
+> 诚实边界：这是**长多、相对收益**的横截面研究，仍是股票 beta——熊市会有回撤。历史样本内或部分年份的正 IC 不等于最新真样本外可用；2026 的强动量行情对反转/超跌类因子是逆风。它不构成「永远跑赢无风险、低波动」的绝对收益承诺，也不连接券商、不下单。
 
 ### 消息面 / 公告特征
 
@@ -1060,12 +1062,12 @@ Suggested enablement order:
 ENABLE_REGIME -> ENABLE_SECTOR -> ENABLE_ALPHA158 -> ENABLE_PROPAGATION -> ENABLE_CALIBRATION -> ENABLE_LGBM
 ```
 
-### Quant rebuild & the message-driven event layer (validated, honest)
+### Quant rebuild & the message-driven event layer (health-gated, honest)
 
-Every recent direction was validated on local A-share history (2022–2026) before keeping it. What survived a clean out-of-sample check:
+Every recent direction should be validated on local A-share history before being enabled. What is kept in production now is the validation guardrail, not a promise that the current LightGBM snapshot is tradable:
 
-- **Cross-sectional model rebuilt** — sign-stable factors (reversal + oversold + low-turnover), per-day cross-sectional rank-normalization, regression on rank. Rank IC is now **positive every year** (vs the old model's −0.024 out-of-sample). Reproduce with `python main.py backtest`.
-- **Asymmetric bull/bear models** (`MARKET_REGIME=auto|bull|bear`) — a bear-specialized model lifts out-of-sample bear IC +0.076→+0.096; a separately-trained bull model was *worse* OOS, so bull/normal regimes use the universal model.
+- **Cross-sectional model rebuilt, but health-gated** — factors are rank-normalized per trading day and trained as a cross-sectional regression target. On load, `analysis/lgbm.py` reads `lgbm_meta.json`; if true out-of-sample `test return IC < 0` or `decile 9-0 spread < 0`, inference refuses to emit LightGBM rankings and falls back to the non-model signals. The latest local `robust`, `all`, and `stable` snapshots are marked **UNVALIDATED**, so they are research artifacts until a rebuilt model passes this gate.
+- **Asymmetric bull/bear models** (`MARKET_REGIME=auto|bull|bear`) — a bear-specialized model can be tested separately; a separately-trained bull model was worse in true OOS, so bull/normal regimes must not assume a bull-specific model is valid.
 - **Drawdown** — institutional risk tricks (vol-targeting, beta/sector neutralization, quality screens) gave ~no drawdown reduction; the only lever for a long-only retail book is cutting exposure in risk-off regimes (`backtest --bear-exposure 0.5`), a risk/return dial, not a free lunch.
 - **Rejected after validation (kept honest in docs):** fundamental factors (weak on A-shares), a bigger micro-cap universe (inflates backtest return via illiquidity, no drawdown help), and **event-driven alpha** — a PIT event study found public events (earnings preannouncements, lockup expiries, insider buying, sector sympathy) have **no clean tradeable post-event return** (priced in by announcement).
 
@@ -1084,7 +1086,7 @@ python scripts/build_training_set.py
 python scripts/train_lgbm.py
 ```
 
-Copy `models/lgbm.txt` and `models/lgbm_meta.json` to the deployment machine under `~/.stockwatch/models/`, then set `ENABLE_LGBM=true`.
+Copy `models/lgbm.txt` and `models/lgbm_meta.json` to the deployment machine under `~/.stockwatch/models/`, then set `ENABLE_LGBM=true`. The model still will not be used unless the meta file passes the health gate above. For research-only debugging, set `STOCKWATCH_LGBM_ALLOW_UNVALIDATED=true`.
 
 `build_training_set.py` generates lead-lag propagation features by default. For each date, it detects volume-confirmed leaders, estimates whether candidates historically reacted one trading day later, and adds compact propagation fields such as leader return, lag correlation, underreaction and propagation score. Disable this with:
 
