@@ -628,6 +628,14 @@ python main.py backtest --signal regime --bear-exposure 0.5   # 年线下只用�
 
 **本地历史（2022-01 ~ 2026-05）上的最新复核**（仅研究复盘，非收益承诺）：按真样本外起点对齐后，当前 `robust`、`all`、`stable` 三个 LightGBM 快照的 return IC 或 decile spread 仍为负，说明它们不是可上线模型。系统会把这类模型标为 **UNVALIDATED** 并在线上跳过；后续模型必须先通过 `lgbm_meta.json` 健康门禁，再谈部署。
 
+**中性化标签 + walk-forward 诊断**：新增研究脚本只做诊断，不写 `models/`，用季度 walk-forward 训练 raw-label 与 neutral-label 两组模型，并把每段 OOS 拼起来：
+
+```bash
+.venv/bin/python scripts/evaluate_neutralized_walk_forward.py --num-boost-round 80 --early-stopping 15 --num-threads 2
+```
+
+本地报告输出到 `~/.stockwatch/history/neutralized_walk_forward_report.json`。报告内置 `leakage_audit`：当前机械自检为 **PASS**（每日独立截面 OLS、raw/neutral 两套模型共用同一 walk-forward split、20 个交易日 purge、特征只做 per-date rank）。当前训练集没有可用市值文件，SQLite 的 `stock_sector_map` 也为空，所以这次是**技术风格中性**（BETA/STD/ILLIQ/TURN/VOLZ），还不是完整的行业/市值中性；脚本已支持 `--sector-map` 和 `--market-cap`，拿到 PIT 市值/行业后可直接补跑。轻量配置下，2023-07~2026-05 的 OOS：raw-label 与 neutral-label 模型对原始 `forward_20d_return` 的 daily IC 都约 +0.044，但原始收益 decile spread 仍为负；neutral-label 模型对 `neutral_return` 的 daily IC 约 +0.057、decile spread 约 +0.0041，20 日非重叠抽样下 residual IC 约 +0.066、spread 约 +0.0069。逐 fold residual IC 为 12/12 正，fold ICIR 约 2.89。结论：**现有因子里可能有一点残差 alpha，但主要还停留在残差空间；市值/行业中性化之前只能视为上界，不能当成扣费后可买的 long-only 排序。**
+
 > 诚实边界：这是**长多、相对收益**的横截面研究，仍是股票 beta——熊市会有回撤。历史样本内或部分年份的正 IC 不等于最新真样本外可用；2026 的强动量行情对反转/超跌类因子是逆风。它不构成「永远跑赢无风险、低波动」的绝对收益承诺，也不连接券商、不下单。
 
 ### 消息面 / 公告特征
@@ -1067,6 +1075,14 @@ Every recent direction should be validated on local A-share history before being
 - **Asymmetric bull/bear models** (`MARKET_REGIME=auto|bull|bear`) — a bear-specialized model can be tested separately; a separately-trained bull model was worse in true OOS, so bull/normal regimes must not assume a bull-specific model is valid.
 - **Drawdown** — institutional risk tricks (vol-targeting, beta/sector neutralization, quality screens) gave ~no drawdown reduction; the only lever for a long-only retail book is cutting exposure in risk-off regimes (`backtest --bear-exposure 0.5`), a risk/return dial, not a free lunch.
 - **Rejected after validation (kept honest in docs):** fundamental factors (weak on A-shares), a bigger micro-cap universe (inflates backtest return via illiquidity, no drawdown help), and **event-driven alpha** — a PIT event study found public events (earnings preannouncements, lockup expiries, insider buying, sector sympathy) have **no clean tradeable post-event return** (priced in by announcement).
+
+**Neutralized-label walk-forward diagnostic** — `scripts/evaluate_neutralized_walk_forward.py` is a research-only check. It trains raw-label and neutral-label models in quarterly walk-forward folds, keeps a purge gap for the 20-day label, and writes `~/.stockwatch/history/neutralized_walk_forward_report.json` without touching `models/`:
+
+```bash
+.venv/bin/python scripts/evaluate_neutralized_walk_forward.py --num-boost-round 80 --early-stopping 15 --num-threads 2
+```
+
+The report includes a `leakage_audit`; the current mechanical checks pass: neutralization is fit independently by trade date, raw-label and neutral-label models share the same walk-forward folds, the 20-trading-day purge is present, and features are ranked only within each date. The current local store has no market-cap parquet and an empty `stock_sector_map`, so the latest run is style-neutral only (BETA/STD/ILLIQ/TURN/VOLZ), not full industry/size neutral. The script accepts `--sector-map` and `--market-cap` for a stricter rerun once PIT exposure data is available. On the local 2023-07~2026-05 OOS path, both raw-label and neutral-label models have about +0.044 daily IC versus raw `forward_20d_return`, but raw-return decile spread remains negative. The neutral-label model has about +0.057 daily IC and +0.0041 spread versus `neutral_return`; the non-overlapping 20-day sample is about +0.066 residual IC and +0.0069 spread. Residual IC is positive in 12/12 folds, with fold ICIR about 2.89. Read this as an upper-bound residual-alpha candidate until full industry/size neutralization passes, not a long-only tradable model.
 
 **Event layer (`ENABLE_EVENTS=true`, `analysis/events.py`)** — because events still matter for *risk/context*, not prediction. It pulls structured events (lockup calendar, earnings preannouncements, insider trades, buybacks), flags each as a plain-language risk/info note, and feeds them into the daily analysis and stock Q&A. With `ENABLE_SECTOR=true` it also adds **sector-propagation (连带)** notes — same-sector peers with events — explicitly labelled as sentiment context (the measured sympathy effect is only ~+0.04% next-day, so it is never presented as a price prediction). Nothing here is a buy/sell instruction or a return forecast.
 
