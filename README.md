@@ -631,10 +631,17 @@ python main.py backtest --signal regime --bear-exposure 0.5   # 年线下只用�
 **中性化标签 + walk-forward 诊断**：新增研究脚本只做诊断，不写 `models/`，用季度 walk-forward 训练 raw-label 与 neutral-label 两组模型，并把每段 OOS 拼起来：
 
 ```bash
-.venv/bin/python scripts/evaluate_neutralized_walk_forward.py --num-boost-round 80 --early-stopping 15 --num-threads 2
+.venv/bin/python scripts/build_neutralization_exposures.py --sleep 0.2 --sector-mode auto
+.venv/bin/python scripts/evaluate_neutralized_walk_forward.py \
+  --market-cap ~/.stockwatch/history/market_cap_daily.parquet \
+  --sector-map ~/.stockwatch/history/sector_map_sw.parquet \
+  --round-trip-cost-bps 20 --top-k 50 \
+  --num-boost-round 80 --early-stopping 15 --num-threads 2
 ```
 
-本地报告输出到 `~/.stockwatch/history/neutralized_walk_forward_report.json`。报告内置 `leakage_audit`：当前机械自检为 **PASS**（每日独立截面 OLS、raw/neutral 两套模型共用同一 walk-forward split、20 个交易日 purge、特征只做 per-date rank）。当前训练集没有可用市值文件，SQLite 的 `stock_sector_map` 也为空，所以这次是**技术风格中性**（BETA/STD/ILLIQ/TURN/VOLZ），还不是完整的行业/市值中性；脚本已支持 `--sector-map` 和 `--market-cap`，拿到 PIT 市值/行业后可直接补跑。轻量配置下，2023-07~2026-05 的 OOS：raw-label 与 neutral-label 模型对原始 `forward_20d_return` 的 daily IC 都约 +0.044，但原始收益 decile spread 仍为负；neutral-label 模型对 `neutral_return` 的 daily IC 约 +0.057、decile spread 约 +0.0041，20 日非重叠抽样下 residual IC 约 +0.066、spread 约 +0.0069。逐 fold residual IC 为 12/12 正，fold ICIR 约 2.89。结论：**现有因子里可能有一点残差 alpha，但主要还停留在残差空间；市值/行业中性化之前只能视为上界，不能当成扣费后可买的 long-only 排序。**
+`build_neutralization_exposures.py` 会从 AKShare 股本结构缓存每只股票的历史总股本/流通 A 股，再和本地日线 close 做 as-of 合并，生成日频 `market_cap_daily.parquet`；申万行业优先拉历史分类，失败时退到申万一级当前成分，并在报告里标成 `static_current` 局限。诊断报告输出到 `~/.stockwatch/history/neutralized_walk_forward_report.json`，内置 `leakage_audit`，并新增 `primary_long_only_metric` / `long_only_fold_stability`：主指标不再是 IC，而是 `decile_9` 或 `top-k` 扣除 `--round-trip-cost-bps` 后，相对等权 universe 的逐折超额。
+
+Pi 全量复核（2026-06-16）里，日频市值覆盖 2296/2348 只、训练样本 1283974 行；申万历史分类未取到，行业使用申万一级当前成分，报告标为 `static_current`，所以这仍不是完美历史行业 PIT。加入 `log_market_cap + 行业 + 技术风格` 后，neutral-label 模型对 `neutral_return` 的 daily IC 仍有 +0.0526、ICIR 0.92，20 日非重叠 residual IC +0.0624、ICIR 1.00，逐 fold residual IC 12/12 为正。但真正可交易的 long-only 主指标失败：原始收益 `decile_9` 扣 20bps 后相对等权 universe 为 −0.91%，`top50` 为 −1.09%；非重叠口径分别为 −1.38% / −1.67%；逐 fold 顶档净超额均值 −1.00%，只有 3/12 折为正。结论：**这条信号最多是负面筛选/黑名单候选，不是可买 top-k 的 long-only 排序。**
 
 > 诚实边界：这是**长多、相对收益**的横截面研究，仍是股票 beta——熊市会有回撤。历史样本内或部分年份的正 IC 不等于最新真样本外可用；2026 的强动量行情对反转/超跌类因子是逆风。它不构成「永远跑赢无风险、低波动」的绝对收益承诺，也不连接券商、不下单。
 
@@ -1079,10 +1086,17 @@ Every recent direction should be validated on local A-share history before being
 **Neutralized-label walk-forward diagnostic** — `scripts/evaluate_neutralized_walk_forward.py` is a research-only check. It trains raw-label and neutral-label models in quarterly walk-forward folds, keeps a purge gap for the 20-day label, and writes `~/.stockwatch/history/neutralized_walk_forward_report.json` without touching `models/`:
 
 ```bash
-.venv/bin/python scripts/evaluate_neutralized_walk_forward.py --num-boost-round 80 --early-stopping 15 --num-threads 2
+.venv/bin/python scripts/build_neutralization_exposures.py --sleep 0.2 --sector-mode auto
+.venv/bin/python scripts/evaluate_neutralized_walk_forward.py \
+  --market-cap ~/.stockwatch/history/market_cap_daily.parquet \
+  --sector-map ~/.stockwatch/history/sector_map_sw.parquet \
+  --round-trip-cost-bps 20 --top-k 50 \
+  --num-boost-round 80 --early-stopping 15 --num-threads 2
 ```
 
-The report includes a `leakage_audit`; the current mechanical checks pass: neutralization is fit independently by trade date, raw-label and neutral-label models share the same walk-forward folds, the 20-trading-day purge is present, and features are ranked only within each date. The current local store has no market-cap parquet and an empty `stock_sector_map`, so the latest run is style-neutral only (BETA/STD/ILLIQ/TURN/VOLZ), not full industry/size neutral. The script accepts `--sector-map` and `--market-cap` for a stricter rerun once PIT exposure data is available. On the local 2023-07~2026-05 OOS path, both raw-label and neutral-label models have about +0.044 daily IC versus raw `forward_20d_return`, but raw-return decile spread remains negative. The neutral-label model has about +0.057 daily IC and +0.0041 spread versus `neutral_return`; the non-overlapping 20-day sample is about +0.066 residual IC and +0.0069 spread. Residual IC is positive in 12/12 folds, with fold ICIR about 2.89. Read this as an upper-bound residual-alpha candidate until full industry/size neutralization passes, not a long-only tradable model.
+`build_neutralization_exposures.py` caches AKShare share-structure history per stock, as-of merges total/float A-shares with local close prices, and writes daily `market_cap_daily.parquet`. It tries Shenwan historical industry first; if unavailable, it falls back to current Shenwan first-level constituents and marks the sector exposure as `static_current`. The diagnostic report includes `leakage_audit` plus `primary_long_only_metric` / `long_only_fold_stability`; the main success criterion is now `decile_9` or `top-k` net excess return versus the equal-weight universe after the configured `--round-trip-cost-bps`, not mean IC alone.
+
+The Pi full rerun on 2026-06-16 covered 2296/2348 names with daily market cap and 1283974 training rows. Shenwan historical membership was unavailable, so sector exposure uses current Shenwan first-level constituents and is marked `static_current`; this is still not perfect historical sector PIT. After adding `log_market_cap + sector + technical style` controls, the neutral-label model still has +0.0526 daily IC versus `neutral_return` (ICIR 0.92), +0.0624 non-overlapping residual IC (ICIR 1.00), and positive residual IC in 12/12 folds. The tradeable long-only metric fails: raw-return `decile_9` net excess versus the equal-weight universe is −0.91% after 20 bps, `top50` is −1.09%, and the non-overlapping view is −1.38% / −1.67%; fold-level top-decile net excess averages −1.00% with only 3/12 positive folds. Treat this as a negative-screening / blacklist candidate, not a buyable top-k long-only ranker.
 
 **Event layer (`ENABLE_EVENTS=true`, `analysis/events.py`)** — because events still matter for *risk/context*, not prediction. It pulls structured events (lockup calendar, earnings preannouncements, insider trades, buybacks), flags each as a plain-language risk/info note, and feeds them into the daily analysis and stock Q&A. With `ENABLE_SECTOR=true` it also adds **sector-propagation (连带)** notes — same-sector peers with events — explicitly labelled as sentiment context (the measured sympathy effect is only ~+0.04% next-day, so it is never presented as a price prediction). Nothing here is a buy/sell instruction or a return forecast.
 

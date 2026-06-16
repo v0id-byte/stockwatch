@@ -8,6 +8,8 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from scripts.evaluate_neutralized_walk_forward import (
+    _long_only_stats,
+    _merge_sector_exposure,
     _non_overlapping,
     make_walk_forward_folds,
     neutralize_by_date,
@@ -73,3 +75,44 @@ def test_non_overlapping_keeps_every_nth_trade_date():
         pd.Timestamp("2024-01-04"),
         pd.Timestamp("2024-01-09"),
     ]
+
+
+def test_long_only_stats_reports_top_bucket_net_excess():
+    data = pd.DataFrame({
+        "trade_date": [pd.Timestamp("2024-01-01")] * 100,
+        "pred": np.arange(100),
+        "target": np.linspace(-0.05, 0.05, 100),
+    })
+
+    stats = _long_only_stats(data, "pred", "target", min_per_date=30, top_k=5, round_trip_cost=0.002)
+
+    assert stats is not None
+    ranks = data["pred"].rank(method="first", pct=True)
+    deciles = (ranks * 10).clip(upper=9).astype(int)
+    expected_top = data[deciles == 9]["target"].mean()
+    expected_universe = data["target"].mean()
+    assert stats["top_decile_excess"] == expected_top - expected_universe
+    assert stats["top_decile_net_excess"] == expected_top - expected_universe - 0.002
+    assert stats["top_k"] == 5
+
+
+def test_merge_sector_exposure_uses_historical_asof_dates(tmp_path):
+    data = pd.DataFrame({
+        "trade_date": pd.to_datetime(["2024-01-01", "2024-07-01", "2024-01-01"]),
+        "code": ["000001", "000001", "000002"],
+    })
+    sectors = pd.DataFrame({
+        "code": ["000001", "000001", "000002"],
+        "start_date": pd.to_datetime(["2023-01-01", "2024-06-01", "2023-01-01"]),
+        "sector": ["银行", "非银金融", "电子"],
+    })
+    path = tmp_path / "sector.parquet"
+    sectors.to_parquet(path, index=False)
+
+    merged, meta = _merge_sector_exposure(data, str(path))
+
+    assert meta["kind"] == "point_in_time"
+    by_key = dict(zip(zip(merged["code"], merged["trade_date"]), merged["sector"]))
+    assert by_key[("000001", pd.Timestamp("2024-01-01"))] == "银行"
+    assert by_key[("000001", pd.Timestamp("2024-07-01"))] == "非银金融"
+    assert by_key[("000002", pd.Timestamp("2024-01-01"))] == "电子"

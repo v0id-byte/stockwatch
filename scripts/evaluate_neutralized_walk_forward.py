@@ -50,6 +50,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--num-threads", type=int, default=2, help="LightGBM worker threads.")
     parser.add_argument("--winsor", type=float, default=0.01, help="Per-date target winsorization tail.")
     parser.add_argument("--min-per-date", type=int, default=30)
+    parser.add_argument("--top-k", type=int, default=50, help="Long-only top-k bucket size for diagnostics.")
+    parser.add_argument(
+        "--round-trip-cost-bps",
+        type=float,
+        default=20.0,
+        help="Research cost assumption subtracted from long-only top buckets.",
+    )
     parser.add_argument("--output", default="", help="JSON report path.")
     return parser.parse_args()
 
@@ -97,7 +104,17 @@ def _ordered_existing(columns: list[str], available: set[str]) -> list[str]:
 def _read_table(path: Path) -> pd.DataFrame:
     if path.suffix.lower() in {".parquet", ".pq"}:
         return pd.read_parquet(path)
+    if path.suffix.lower() in {".xls", ".xlsx"}:
+        return pd.read_excel(path)
     return pd.read_csv(path)
+
+
+def _pick_column(columns: list[str], candidates: list[str]) -> str:
+    return next((col for col in candidates if col in columns), "")
+
+
+def _normalize_code(values: pd.Series) -> pd.Series:
+    return values.astype(str).str.extract(r"(\d{6})", expand=False).fillna("").str.zfill(6)
 
 
 def _load_sector_map(path_text: str) -> tuple[dict[str, str], str]:
@@ -116,6 +133,50 @@ def _load_sector_map(path_text: str) -> tuple[dict[str, str], str]:
         return mapping, "sqlite:stock_sector_map"
     except Exception:
         return {}, "none"
+
+
+def _merge_sector_exposure(data: pd.DataFrame, path_text: str) -> tuple[pd.DataFrame, dict]:
+    if path_text:
+        path = Path(path_text).expanduser()
+        raw = _read_table(path)
+        code_col = _pick_column(list(raw.columns), ["code", "symbol", "股票代码", "证券代码"])
+        sector_col = _pick_column(list(raw.columns), ["sector", "industry", "行业名称", "申万行业", "一级行业"])
+        date_col = _pick_column(list(raw.columns), ["trade_date", "start_date", "effective_date", "计入日期"])
+        if not code_col or not sector_col:
+            raise RuntimeError(f"sector map must contain code and sector columns: {path}")
+        sectors = raw[[code_col, sector_col, *([date_col] if date_col else [])]].copy()
+        sectors["code"] = _normalize_code(sectors[code_col])
+        sectors["sector"] = sectors[sector_col].astype(str)
+        sectors = sectors[(sectors["code"] != "") & sectors["sector"].notna()]
+        if date_col:
+            sectors["sector_date"] = pd.to_datetime(sectors[date_col], errors="coerce")
+            sectors = sectors.dropna(subset=["sector_date"]).sort_values(["sector_date", "code"])
+            left = data.copy().sort_values(["trade_date", "code"])
+            merged = pd.merge_asof(
+                left,
+                sectors[["code", "sector_date", "sector"]],
+                left_on="trade_date",
+                right_on="sector_date",
+                by="code",
+                direction="backward",
+                allow_exact_matches=True,
+            ).sort_index()
+            kind = "point_in_time"
+        else:
+            latest = sectors.drop_duplicates("code", keep="last")
+            mapping = dict(zip(latest["code"], latest["sector"]))
+            merged = data.copy()
+            merged["sector"] = merged["code"].map(mapping)
+            kind = "static_current"
+        coverage = float(merged["sector"].notna().mean()) if "sector" in merged.columns else 0.0
+        return merged, {"enabled": coverage > 0, "source": str(path), "kind": kind, "coverage": coverage}
+
+    mapping, source = _load_sector_map("")
+    out = data.copy()
+    if mapping:
+        out["sector"] = out["code"].map(mapping)
+    coverage = float(out["sector"].notna().mean()) if "sector" in out.columns else 0.0
+    return out, {"enabled": coverage > 0, "source": source, "kind": "static_current" if mapping else "none", "coverage": coverage}
 
 
 def _pick_market_cap_col(columns: list[str]) -> str:
@@ -302,6 +363,92 @@ def _decile_spread(data: pd.DataFrame, pred_col: str, target_col: str, min_per_d
     }
 
 
+def _series_stats(values: list[float], include_values: bool = False) -> dict | None:
+    values = [value for value in values if value is not None and pd.notna(value)]
+    if not values:
+        return None
+    series = pd.Series(values, dtype="float64")
+    std = series.std()
+    out = {
+        "mean": float(series.mean()),
+        "std": float(std) if pd.notna(std) else None,
+        "icir": float(series.mean() / std) if pd.notna(std) and std else None,
+        "positive_rate": float((series > 0).mean()),
+        "count": int(len(series)),
+    }
+    if include_values:
+        out["values"] = [float(value) for value in values]
+    return out
+
+
+def _long_only_stats(data: pd.DataFrame, pred_col: str, target_col: str, min_per_date: int,
+                     top_k: int, round_trip_cost: float) -> dict | None:
+    rows = []
+    for date, group in data.dropna(subset=[pred_col, target_col]).groupby("trade_date", sort=False):
+        if len(group) < min_per_date or group[pred_col].nunique() <= 1:
+            continue
+        ordered = group.sort_values(pred_col, ascending=False)
+        ranks = group[pred_col].rank(method="first", pct=True)
+        deciles = (ranks * 10).clip(upper=9).astype(int)
+        top_decile = group[deciles == 9]
+        bottom_decile = group[deciles == 0]
+        if top_decile.empty or bottom_decile.empty:
+            continue
+        universe_return = float(group[target_col].mean())
+        top_decile_return = float(top_decile[target_col].mean())
+        bottom_decile_return = float(bottom_decile[target_col].mean())
+        row = {
+            "date": str(pd.Timestamp(date).date()),
+            "universe_return": universe_return,
+            "top_decile_return": top_decile_return,
+            "top_decile_excess": top_decile_return - universe_return,
+            "top_decile_net_excess": top_decile_return - universe_return - round_trip_cost,
+            "bottom_decile_return": bottom_decile_return,
+            "bottom_decile_excess": bottom_decile_return - universe_return,
+            "spread_9_minus_0": top_decile_return - bottom_decile_return,
+            "n": int(len(group)),
+            "top_decile_n": int(len(top_decile)),
+        }
+        if top_k > 0:
+            top_k_count = min(int(top_k), len(ordered))
+            top_k_group = ordered.head(top_k_count)
+            top_k_return = float(top_k_group[target_col].mean())
+            row.update({
+                "top_k": int(top_k_count),
+                "top_k_return": top_k_return,
+                "top_k_excess": top_k_return - universe_return,
+                "top_k_net_excess": top_k_return - universe_return - round_trip_cost,
+            })
+        rows.append(row)
+    if not rows:
+        return None
+
+    def mean_of(key: str) -> float | None:
+        values = [row[key] for row in rows if key in row and pd.notna(row[key])]
+        return float(pd.Series(values, dtype="float64").mean()) if values else None
+
+    top_decile_net = [row["top_decile_net_excess"] for row in rows]
+    top_k_net = [row["top_k_net_excess"] for row in rows if "top_k_net_excess" in row]
+    return {
+        "round_trip_cost": float(round_trip_cost),
+        "round_trip_cost_bps": float(round_trip_cost * 10000),
+        "universe_return": mean_of("universe_return"),
+        "top_decile_return": mean_of("top_decile_return"),
+        "top_decile_excess": mean_of("top_decile_excess"),
+        "top_decile_net_excess": mean_of("top_decile_net_excess"),
+        "top_decile_net_stats": _series_stats(top_decile_net),
+        "bottom_decile_return": mean_of("bottom_decile_return"),
+        "bottom_decile_excess": mean_of("bottom_decile_excess"),
+        "spread_9_minus_0": mean_of("spread_9_minus_0"),
+        "top_k": int(top_k) if top_k > 0 else None,
+        "top_k_return": mean_of("top_k_return"),
+        "top_k_excess": mean_of("top_k_excess"),
+        "top_k_net_excess": mean_of("top_k_net_excess"),
+        "top_k_net_stats": _series_stats(top_k_net),
+        "count": int(len(rows)),
+    }
+
+
 def _non_overlapping(data: pd.DataFrame, step: int) -> pd.DataFrame:
     if step <= 1:
         return data
@@ -311,12 +458,16 @@ def _non_overlapping(data: pd.DataFrame, step: int) -> pd.DataFrame:
 
 
 def _model_metrics(data: pd.DataFrame, pred_col: str, target_cols: list[str],
-                   min_per_date: int, non_overlap_step: int) -> dict:
+                   min_per_date: int, non_overlap_step: int, top_k: int,
+                   round_trip_cost: float) -> dict:
     out = {}
     for target_col in target_cols:
         out[target_col] = {
             "ic": _ic_stats(data, pred_col, target_col, min_per_date),
             "decile": _decile_spread(data, pred_col, target_col, min_per_date),
+            "long_only": _long_only_stats(
+                data, pred_col, target_col, min_per_date, top_k, round_trip_cost,
+            ),
         }
     sampled = _non_overlapping(data, non_overlap_step)
     out["non_overlapping"] = {}
@@ -324,6 +475,9 @@ def _model_metrics(data: pd.DataFrame, pred_col: str, target_cols: list[str],
         out["non_overlapping"][target_col] = {
             "ic": _ic_stats(sampled, pred_col, target_col, min_per_date),
             "decile": _decile_spread(sampled, pred_col, target_col, min_per_date),
+            "long_only": _long_only_stats(
+                sampled, pred_col, target_col, min_per_date, top_k, round_trip_cost,
+            ),
         }
     return out
 
@@ -364,6 +518,32 @@ def _fold_stability(by_fold: dict, target_cols: list[str]) -> dict:
                 "fold_count": int(len(series)),
                 "fold_ics": [float(value) for value in values],
             }
+    return out
+
+
+def _long_only_value(block: dict, model_key: str, target_col: str, key: str,
+                     sampled: bool = False) -> float | None:
+    model_block = block.get(model_key) or {}
+    if sampled:
+        target_block = (model_block.get("non_overlapping") or {}).get(target_col) or {}
+    else:
+        target_block = model_block.get(target_col) or {}
+    value = (target_block.get("long_only") or {}).get(key)
+    return float(value) if value is not None else None
+
+
+def _fold_long_only_stability(by_fold: dict, target_cols: list[str]) -> dict:
+    out = {}
+    for model_key in ("raw_label_model", "neutral_label_model"):
+        out[model_key] = {}
+        for target_col in target_cols:
+            out[model_key][target_col] = {}
+            for key in ("top_decile_net_excess", "top_k_net_excess"):
+                values = [
+                    _long_only_value(block, model_key, target_col, key)
+                    for block in by_fold.values()
+                ]
+                out[model_key][target_col][key] = _series_stats(values, include_values=True)
     return out
 
 
@@ -439,12 +619,15 @@ def _summarize_predictions(preds: pd.DataFrame, root: Path, args: argparse.Names
     preds = preds.copy()
     preds["regime"] = _regime_by_date(root, preds["trade_date"])
     target_cols = [args.target, "neutral_return"]
+    round_trip_cost = max(0.0, float(args.round_trip_cost_bps)) / 10000.0
     report = {
         "raw_label_model": _model_metrics(
             preds, "pred_raw_label", target_cols, args.min_per_date, non_overlap_step,
+            args.top_k, round_trip_cost,
         ),
         "neutral_label_model": _model_metrics(
             preds, "pred_neutral_label", target_cols, args.min_per_date, non_overlap_step,
+            args.top_k, round_trip_cost,
         ),
         "by_year": {},
         "by_regime": {},
@@ -458,18 +641,22 @@ def _summarize_predictions(preds: pd.DataFrame, root: Path, args: argparse.Names
             "date_end": str(group["trade_date"].max().date()),
             "raw_label_model": _model_metrics(
                 group, "pred_raw_label", target_cols, args.min_per_date, non_overlap_step,
+                args.top_k, round_trip_cost,
             ),
             "neutral_label_model": _model_metrics(
                 group, "pred_neutral_label", target_cols, args.min_per_date, non_overlap_step,
+                args.top_k, round_trip_cost,
             ),
         }
     for year, group in preds.groupby(preds["trade_date"].dt.year):
         report["by_year"][str(int(year))] = {
             "raw_label_model": _model_metrics(
                 group, "pred_raw_label", target_cols, args.min_per_date, non_overlap_step,
+                args.top_k, round_trip_cost,
             ),
             "neutral_label_model": _model_metrics(
                 group, "pred_neutral_label", target_cols, args.min_per_date, non_overlap_step,
+                args.top_k, round_trip_cost,
             ),
         }
     for regime, group in preds.groupby("regime"):
@@ -478,12 +665,15 @@ def _summarize_predictions(preds: pd.DataFrame, root: Path, args: argparse.Names
             "dates": int(group["trade_date"].nunique()),
             "raw_label_model": _model_metrics(
                 group, "pred_raw_label", target_cols, args.min_per_date, non_overlap_step,
+                args.top_k, round_trip_cost,
             ),
             "neutral_label_model": _model_metrics(
                 group, "pred_neutral_label", target_cols, args.min_per_date, non_overlap_step,
+                args.top_k, round_trip_cost,
             ),
         }
     report["fold_stability"] = _fold_stability(report["by_fold"], target_cols)
+    report["long_only_fold_stability"] = _fold_long_only_stability(report["by_fold"], target_cols)
     return report
 
 
@@ -515,13 +705,39 @@ def _leakage_audit(folds: list[dict], horizon: int, feature_names: list[str],
         "limitations": {
             "full_industry_size_neutral": bool(
                 neutralization["sector_enabled"]
+                and neutralization["sector"].get("kind") == "point_in_time"
                 and neutralization["market_cap"].get("enabled")
                 and neutralization["market_cap"].get("kind") == "point_in_time"
             ),
             "sector_enabled": neutralization["sector_enabled"],
+            "sector_kind": neutralization["sector"].get("kind"),
             "market_cap_enabled": bool(neutralization["market_cap"].get("enabled")),
             "market_cap_kind": neutralization["market_cap"].get("kind"),
             "note": "PASS means the current diagnostic mechanics are PIT-safe; it does not mean the residual alpha survives missing industry/size controls.",
+        },
+    }
+
+
+def _primary_long_only_metrics(metrics: dict, target_col: str) -> dict:
+    block = ((metrics.get("neutral_label_model") or {}).get(target_col) or {}).get("long_only") or {}
+    sampled = (((metrics.get("neutral_label_model") or {}).get("non_overlapping") or {}).get(target_col) or {}).get("long_only") or {}
+    return {
+        "model": "neutral_label_model",
+        "target": target_col,
+        "criterion": "top buckets net excess return versus equal-weight universe",
+        "daily": {
+            "top_decile_net_excess": block.get("top_decile_net_excess"),
+            "top_decile_net_stats": block.get("top_decile_net_stats"),
+            "top_k": block.get("top_k"),
+            "top_k_net_excess": block.get("top_k_net_excess"),
+            "top_k_net_stats": block.get("top_k_net_stats"),
+        },
+        "non_overlapping": {
+            "top_decile_net_excess": sampled.get("top_decile_net_excess"),
+            "top_decile_net_stats": sampled.get("top_decile_net_stats"),
+            "top_k": sampled.get("top_k"),
+            "top_k_net_excess": sampled.get("top_k_net_excess"),
+            "top_k_net_stats": sampled.get("top_k_net_stats"),
         },
     }
 
@@ -552,9 +768,7 @@ def main() -> None:
     data["trade_date"] = pd.to_datetime(data["trade_date"])
     data = _rank_normalize_features(data, features)
 
-    sector_map, sector_source = _load_sector_map(args.sector_map)
-    if sector_map:
-        data["sector"] = data["code"].map(sector_map)
+    data, sector_meta = _merge_sector_exposure(data, args.sector_map)
     data, cap_meta = _merge_market_cap(data, args.market_cap)
 
     numeric_exposures = [col for col in style_exposures if col in data.columns]
@@ -592,11 +806,12 @@ def main() -> None:
     neutralization_meta = {
         "numeric_exposures": numeric_exposures,
         "sector_enabled": bool(sector_col),
-        "sector_source": sector_source,
+        "sector": sector_meta,
+        "sector_source": sector_meta["source"],
         "sector_coverage": float(data["sector"].notna().mean()) if "sector" in data.columns else 0.0,
         "market_cap": cap_meta,
         "winsor_tail": args.winsor,
-        "note": "If sector or market_cap coverage is 0, this is style-neutral only, not full industry/size neutral.",
+        "note": "Full neutralization requires point-in-time sector and market-cap exposures.",
     }
     report = {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
@@ -617,6 +832,9 @@ def main() -> None:
         "pred_rows": int(len(preds)),
         "pred_dates": int(preds["trade_date"].nunique()),
         "non_overlap_step": horizon,
+        "top_k": int(args.top_k),
+        "round_trip_cost_bps": float(args.round_trip_cost_bps),
+        "primary_long_only_metric": _primary_long_only_metrics(metrics, args.target),
         "metrics": metrics,
     }
     output = Path(args.output).expanduser() if args.output else root / "neutralized_walk_forward_report.json"
@@ -627,9 +845,11 @@ def main() -> None:
         neutral_ic = (((metrics.get(model_key) or {}).get("neutral_return") or {}).get("ic") or {}).get("mean")
         raw_spread = (((metrics.get(model_key) or {}).get(args.target) or {}).get("decile") or {}).get("spread_9_minus_0")
         neutral_spread = (((metrics.get(model_key) or {}).get("neutral_return") or {}).get("decile") or {}).get("spread_9_minus_0")
+        raw_top_net = (((metrics.get(model_key) or {}).get(args.target) or {}).get("long_only") or {}).get("top_decile_net_excess")
         print(
             f"{model_key}: raw_return_IC={raw_ic}, neutral_return_IC={neutral_ic}, "
-            f"raw_spread={raw_spread}, neutral_spread={neutral_spread}"
+            f"raw_spread={raw_spread}, neutral_spread={neutral_spread}, "
+            f"raw_top_decile_net_excess={raw_top_net}"
         )
 
 
