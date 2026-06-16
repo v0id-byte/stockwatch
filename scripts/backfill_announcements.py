@@ -42,6 +42,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout", type=float, default=15.0, help="Per CNINFO request read timeout in seconds.")
     parser.add_argument("--retries", type=int, default=3, help="Chunk retry count.")
     parser.add_argument("--force", action="store_true", help="Refetch chunks already marked done.")
+    parser.add_argument("--only-failed", action="store_true", help="Only retry chunks currently marked failed.")
+    parser.add_argument("--status", action="store_true", help="Print resumable progress for this task grid and exit.")
     return parser.parse_args()
 
 
@@ -239,7 +241,8 @@ def _day_chunks(start: pd.Timestamp, end: pd.Timestamp, days: int):
 
 
 def _build_tasks(args: argparse.Namespace, codes: list[str], start: pd.Timestamp,
-                 end: pd.Timestamp, org_ids: dict[str, str]) -> list[dict]:
+                 end: pd.Timestamp, org_ids: dict[str, str],
+                 require_org_ids: bool = True) -> list[dict]:
     if args.mode == "market":
         return [
             {"mode": "market", "code": MARKET_PROGRESS_CODE, "chunk_start": chunk_start, "chunk_end": chunk_end}
@@ -249,32 +252,97 @@ def _build_tasks(args: argparse.Namespace, codes: list[str], start: pd.Timestamp
     tasks = []
     for code in codes:
         org_id = org_ids.get(code)
-        if not org_id:
+        if require_org_ids and not org_id:
             print(f"skip {code}: missing cninfo orgId", flush=True)
             continue
         for chunk_start, chunk_end in _month_chunks(start, end, args.chunk_months):
             tasks.append({
                 "mode": "by-code",
                 "code": code,
-                "org_id": org_id,
+                "org_id": org_id or "",
                 "chunk_start": chunk_start,
                 "chunk_end": chunk_end,
             })
     return tasks
 
 
-def _skip_done(tasks: list[dict], storage: Storage, force: bool) -> list[dict]:
+def _task_key(row: dict) -> tuple[str, str, str]:
+    return str(row["code"]), str(row["chunk_start"]), str(row["chunk_end"])
+
+
+def _progress_by_key(rows: list[dict]) -> dict[tuple[str, str, str], dict]:
+    return {_task_key(row): row for row in rows}
+
+
+def _select_tasks(tasks: list[dict], storage: Storage, force: bool,
+                  only_failed: bool = False) -> list[dict]:
+    progress = _progress_by_key(storage.get_announcement_progress())
     if force:
         return tasks
-    done = {
-        (row["code"], row["chunk_start"], row["chunk_end"])
-        for row in storage.get_announcement_progress()
-        if row.get("status") == "done"
+    if only_failed:
+        return [task for task in tasks if progress.get(_task_key(task), {}).get("status") == "failed"]
+    return [task for task in tasks if progress.get(_task_key(task), {}).get("status") != "done"]
+
+
+def _progress_summary(tasks: list[dict], progress_rows: list[dict]) -> dict:
+    progress = _progress_by_key(progress_rows)
+    summary = {
+        "total": len(tasks),
+        "missing": 0,
+        "pending": 0,
+        "done": 0,
+        "failed": 0,
+        "other": 0,
+        "rows_done": 0,
+        "latest_update": None,
+        "failed_examples": [],
     }
-    return [
-        task for task in tasks
-        if (task["code"], task["chunk_start"], task["chunk_end"]) not in done
-    ]
+    for task in tasks:
+        row = progress.get(_task_key(task))
+        if row is None:
+            summary["missing"] += 1
+            continue
+        status = row.get("status")
+        if status in ("pending", "done", "failed"):
+            summary[status] += 1
+        else:
+            summary["other"] += 1
+        if status == "done":
+            summary["rows_done"] += int(row.get("fetched_count") or 0)
+        updated_at = row.get("updated_at")
+        if updated_at and (summary["latest_update"] is None or updated_at > summary["latest_update"]):
+            summary["latest_update"] = updated_at
+        if status == "failed" and len(summary["failed_examples"]) < 5:
+            summary["failed_examples"].append(row)
+    return summary
+
+
+def _print_progress_summary(mode: str, start: pd.Timestamp, end: pd.Timestamp,
+                            summary: dict) -> None:
+    total = summary["total"]
+    done = summary["done"]
+    pct = (done / total * 100) if total else 100.0
+    remaining = total - done
+    print(
+        f"announcement progress mode={mode}, start={start.date()}, end={end.date()}, "
+        f"chunks={total}, done={done}, remaining={remaining}, completion={pct:.1f}%",
+        flush=True,
+    )
+    print(
+        f"pending={summary['pending']}, failed={summary['failed']}, "
+        f"not_started={summary['missing']}, other={summary['other']}, "
+        f"rows_done={summary['rows_done']}, latest_update={summary['latest_update'] or '-'}",
+        flush=True,
+    )
+    if summary["failed_examples"]:
+        print("failed examples:", flush=True)
+        for row in summary["failed_examples"]:
+            error = str(row.get("error") or "").replace("\n", " ")[:160]
+            print(
+                f"  {row['code']} {row['chunk_start']}~{row['chunk_end']} "
+                f"attempts={row.get('attempts') or 0} error={error}",
+                flush=True,
+            )
 
 
 def _run_task(task: dict, args: argparse.Namespace, storage: Storage,
@@ -319,12 +387,24 @@ def main() -> None:
     storage = Storage()
 
     org_ids = {}
-    if args.mode == "by-code":
+    if args.mode == "by-code" and not args.status:
         org_ids = _cninfo_stock_org_ids(args.timeout, args.retries, args.delay)
-    tasks = _build_tasks(args, codes, start, end, org_ids)
-    tasks = _skip_done(tasks, storage, args.force)
+    tasks = _build_tasks(args, codes, start, end, org_ids, require_org_ids=not args.status)
+    if args.status:
+        _print_progress_summary(
+            args.mode,
+            start,
+            end,
+            _progress_summary(tasks, storage.get_announcement_progress()),
+        )
+        return
+
+    tasks = _select_tasks(tasks, storage, args.force, args.only_failed)
     if not tasks:
-        print("announcement backfill: no pending chunks")
+        if args.only_failed:
+            print("announcement backfill: no failed chunks")
+        else:
+            print("announcement backfill: no pending chunks")
         return
 
     print(

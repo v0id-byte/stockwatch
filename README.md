@@ -635,27 +635,30 @@ python main.py backtest --signal regime --bear-exposure 0.5   # 年线下只用�
 通用新闻情绪只能使用前向采集的数据：`news` 表会记录 `fetched_at`、`available_at` 和 `sentiment_model_version`，训练时应以 `available_at` 作为可见时间，不能用今天回补到的历史新闻重建过去信号。巨潮公告先回补到本地 raw store，再离线构建特征；日期型/午夜公告会保守滚到下一交易日，避免收盘前不可见的同日泄漏。
 
 ```bash
-python scripts/check_sentiment_pit.py
-python scripts/backfill_announcements.py --mode by-code --workers 4
-python scripts/inspect_announcements.py
-python scripts/build_sentiment_features.py
-python scripts/evaluate_sentiment_features.py --features news_score_7d,ann_count_20d
+.venv/bin/python scripts/check_sentiment_pit.py
+.venv/bin/python scripts/backfill_announcements.py --status --mode by-code
+.venv/bin/python scripts/backfill_announcements.py --mode by-code --workers 4
+.venv/bin/python scripts/inspect_announcements.py
+.venv/bin/python scripts/build_sentiment_features.py
+.venv/bin/python scripts/evaluate_sentiment_features.py --features news_score_7d,ann_count_20d
 ```
 
-`backfill_announcements.py` 会把 cninfo 原始公告 upsert 到 SQLite，并用 `announcement_fetch_progress` 记录每个 chunk 的 `pending/done/failed` 状态；重启时会跳过已完成 chunk，失败 chunk 会在下次运行继续补。`build_sentiment_features.py` 只读本地 raw 公告库，不再直接访问 cninfo。
+`backfill_announcements.py` 会把 cninfo 原始公告 upsert 到 SQLite，并用 `announcement_fetch_progress` 记录每个 chunk 的 `pending/done/failed` 状态；重启时会跳过已完成 chunk，失败 chunk 会在下次运行继续补。`--status` 只读本地进度并显示完成率、失败样例和已落库条数；长跑结束后可用 `--only-failed` 只重试失败 chunk。`build_sentiment_features.py` 只读本地 raw 公告库，不再直接访问 cninfo。
 
 `build_sentiment_features.py` 会输出 `~/.stockwatch/history/sentiment_features.parquet`。新闻分数缺失保持 `NaN`，另有 `has_news_7d` 标志位；先用 `evaluate_sentiment_features.py` 单独看 IC/decile，再决定是否并入主训练集。全历史公告回补建议放到后台离线运行：
 
 ```bash
-nohup python scripts/backfill_announcements.py --mode by-code --workers 4 --delay 0.2 > announcement_backfill.log 2>&1 &
-python scripts/build_sentiment_features.py --no-news
-python scripts/evaluate_sentiment_features.py
+nohup .venv/bin/python scripts/backfill_announcements.py --mode by-code --workers 2 --delay 0.5 > announcement_backfill.log 2>&1 &
+.venv/bin/python scripts/backfill_announcements.py --status --mode by-code
+.venv/bin/python scripts/backfill_announcements.py --mode by-code --only-failed --workers 2 --delay 0.5
+.venv/bin/python scripts/build_sentiment_features.py --no-news
+.venv/bin/python scripts/evaluate_sentiment_features.py
 ```
 
 cninfo 的历史公告接口也支持 `stock` 留空后的全市场日期窗口分页。如果按票回补太慢，可以用较短日期窗口减少请求数：
 
 ```bash
-python scripts/backfill_announcements.py --mode market --chunk-days 7 --workers 2 --delay 0.2
+.venv/bin/python scripts/backfill_announcements.py --mode market --chunk-days 7 --workers 2 --delay 0.5
 ```
 
 `check_sentiment_pit.py` 是合成数据断言，覆盖 15:00 cutoff、周末滚动和 available_at 后移的 shift 测试。
@@ -1072,6 +1075,19 @@ Every recent direction should be validated on local A-share history before being
 - **Rejected after validation (kept honest in docs):** fundamental factors (weak on A-shares), a bigger micro-cap universe (inflates backtest return via illiquidity, no drawdown help), and **event-driven alpha** — a PIT event study found public events (earnings preannouncements, lockup expiries, insider buying, sector sympathy) have **no clean tradeable post-event return** (priced in by announcement).
 
 **Event layer (`ENABLE_EVENTS=true`, `analysis/events.py`)** — because events still matter for *risk/context*, not prediction. It pulls structured events (lockup calendar, earnings preannouncements, insider trades, buybacks), flags each as a plain-language risk/info note, and feeds them into the daily analysis and stock Q&A. With `ENABLE_SECTOR=true` it also adds **sector-propagation (连带)** notes — same-sector peers with events — explicitly labelled as sentiment context (the measured sympathy effect is only ~+0.04% next-day, so it is never presented as a price prediction). Nothing here is a buy/sell instruction or a return forecast.
+
+For PIT announcement-feature research, keep the heavy CNINFO fetch as Stage 1 and feature building as Stage 2:
+
+```bash
+.venv/bin/python scripts/check_sentiment_pit.py
+.venv/bin/python scripts/backfill_announcements.py --status --mode by-code
+nohup .venv/bin/python scripts/backfill_announcements.py --mode by-code --workers 2 --delay 0.5 > announcement_backfill.log 2>&1 &
+.venv/bin/python scripts/backfill_announcements.py --mode by-code --only-failed --workers 2 --delay 0.5
+.venv/bin/python scripts/build_sentiment_features.py --no-news
+.venv/bin/python scripts/evaluate_sentiment_features.py --features news_score_7d,ann_count_20d
+```
+
+`backfill_announcements.py` persists each chunk immediately into SQLite and tracks `pending/done/failed` in `announcement_fetch_progress`. `--status` prints local resumable progress without touching CNINFO; `--only-failed` retries just the failed tail after an overnight run. `build_sentiment_features.py` reads only the local raw store, and date-only or midnight CNINFO timestamps are rolled conservatively to the next trading day.
 
 For LightGBM offline training:
 
