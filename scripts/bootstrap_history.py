@@ -7,7 +7,7 @@ import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,6 +20,7 @@ from data.market import MarketData
 # STOCKWATCH_INDEX_SYMBOLS=000300,000905,000852,932000 — but the extra micro-caps
 # mostly inflate backtested return via illiquidity, they do not cut drawdown.
 DEFAULT_INDEX_SYMBOLS = ("000300", "000905", "000852")
+BENCHMARK_INDEX_CODES = ("sh000300", "sh000905")
 PROXY_ENV_KEYS = (
     "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
     "http_proxy", "https_proxy", "all_proxy",
@@ -131,6 +132,17 @@ def _disable_proxy_env():
         print(f"已忽略代理环境变量: {', '.join(removed)}")
 
 
+def _save_benchmarks(pd, root: Path) -> dict[str, int]:
+    counts = {}
+    for index_code in BENCHMARK_INDEX_CODES:
+        rows = MarketData().get_index_kline(index_code, limit=1500)
+        if not rows:
+            raise RuntimeError(f"基准指数下载失败: {index_code}")
+        pd.DataFrame(rows).to_parquet(root / f"market_{index_code}.parquet", index=False)
+        counts[index_code] = len(rows)
+    return counts
+
+
 def main():
     _disable_proxy_env()
 
@@ -145,6 +157,10 @@ def main():
     root = Path(os.getenv("STOCKWATCH_HISTORY_DIR", "~/.stockwatch/history")).expanduser()
     stock_dir = root / "stocks"
     stock_dir.mkdir(parents=True, exist_ok=True)
+    if _env_bool("STOCKWATCH_BENCHMARK_ONLY", False):
+        counts = _save_benchmarks(pd, root)
+        print(f"benchmark history saved to {root}: {counts}")
+        return
     start = os.getenv("STOCKWATCH_HISTORY_START", (date.today() - timedelta(days=365 * 5 + 30)).strftime("%Y%m%d"))
     end = os.getenv("STOCKWATCH_HISTORY_END", date.today().strftime("%Y%m%d"))
     index_symbols = _env_list("STOCKWATCH_INDEX_SYMBOLS", DEFAULT_INDEX_SYMBOLS)
@@ -213,13 +229,14 @@ def main():
     if failed_codes:
         print(f"失败代码已写入 {root / 'failed_codes.txt'}，可重跑脚本补下载")
 
-    market = MarketData().get_index_kline("sh000300", limit=1500)
-    if market:
-        pd.DataFrame(market).to_parquet(root / "market_sh000300.parquet", index=False)
+    benchmark_counts = _save_benchmarks(pd, root)
     manifest = {
         "index_symbols": index_symbols,
         "index_counts": index_counts,
         "unique_codes": len(codes),
+        "codes": codes,
+        "constituents_fetched_at": datetime.now().isoformat(timespec="seconds"),
+        "constituent_membership_kind": "current_snapshot_not_point_in_time",
         "success": success,
         "skipped": skipped,
         "failed": failed,
@@ -227,6 +244,7 @@ def main():
         "start": start,
         "end": end,
         "refresh_existing": refresh_existing,
+        "benchmark_counts": benchmark_counts,
     }
     (root / "history_manifest.json").write_text(__import__("json").dumps(manifest, ensure_ascii=False, indent=2))
     print(f"history saved to {root}")

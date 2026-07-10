@@ -57,6 +57,18 @@ def _parse_args() -> argparse.Namespace:
         default=20.0,
         help="Research cost assumption subtracted from long-only top buckets.",
     )
+    parser.add_argument(
+        "--exclude-bottom-fraction",
+        type=float,
+        default=0.10,
+        help="Fraction of lowest model scores excluded by the negative-screen diagnostic.",
+    )
+    parser.add_argument(
+        "--risk-free-annual",
+        type=float,
+        default=0.03,
+        help="Annual return hurdle for the negative-screen portfolio.",
+    )
     parser.add_argument("--output", default="", help="JSON report path.")
     return parser.parse_args()
 
@@ -381,6 +393,112 @@ def _series_stats(values: list[float], include_values: bool = False) -> dict | N
     return out
 
 
+def _portfolio_stats(values: list[float], horizon_days: int,
+                     risk_free_annual: float) -> dict | None:
+    clean = [float(value) for value in values if value is not None and pd.notna(value)]
+    if not clean:
+        return None
+    series = pd.Series(clean, dtype="float64")
+    periods_per_year = 252 / max(1, int(horizon_days))
+    growth = float((1 + series).prod())
+    cagr = None
+    if growth > 0:
+        cagr = float(growth ** (periods_per_year / len(series)) - 1)
+    std = series.std()
+    annualized_vol = float(std * np.sqrt(periods_per_year)) if pd.notna(std) else None
+    risk_free_per_period = float((1 + max(-0.99, risk_free_annual)) ** (1 / periods_per_year) - 1)
+    sharpe = None
+    if pd.notna(std) and std:
+        sharpe = float((series.mean() - risk_free_per_period) / std * np.sqrt(periods_per_year))
+    wealth = (1 + series).cumprod()
+    drawdown = wealth / wealth.cummax() - 1
+    return {
+        "mean_period_return": float(series.mean()),
+        "cagr": cagr,
+        "annualized_vol": annualized_vol,
+        "sharpe_vs_risk_free": sharpe,
+        "max_drawdown": float(drawdown.min()),
+        "positive_rate": float((series > 0).mean()),
+        "period_count": int(len(series)),
+    }
+
+
+def _negative_screen_stats(data: pd.DataFrame, pred_col: str, target_col: str,
+                           min_per_date: int, exclude_bottom_fraction: float,
+                           round_trip_cost: float, horizon_days: int,
+                           risk_free_annual: float) -> dict | None:
+    """Evaluate equal-weight long-only after excluding the lowest model scores."""
+    fraction = min(0.90, max(0.0, float(exclude_bottom_fraction)))
+    if fraction <= 0:
+        return None
+    rows = []
+    for date, group in data.dropna(subset=[pred_col, target_col]).groupby("trade_date", sort=False):
+        if len(group) < min_per_date or group[pred_col].nunique() <= 1:
+            continue
+        exclude_count = max(1, int(np.floor(len(group) * fraction)))
+        exclude_count = min(exclude_count, len(group) - min_per_date)
+        if exclude_count <= 0:
+            continue
+        ordered = group.sort_values(pred_col, ascending=True)
+        excluded = ordered.head(exclude_count)
+        kept = ordered.iloc[exclude_count:]
+        baseline = float(group[target_col].mean())
+        filtered = float(kept[target_col].mean())
+        excluded_return = float(excluded[target_col].mean())
+        rows.append({
+            "date": pd.Timestamp(date),
+            "total_count": int(len(group)),
+            "excluded_count": int(exclude_count),
+            "excluded_fraction": float(exclude_count / len(group)),
+            "baseline_net": baseline - round_trip_cost,
+            "filtered_net": filtered - round_trip_cost,
+            "filtered_excess": filtered - baseline,
+            "excluded_excess": excluded_return - baseline,
+        })
+    if not rows:
+        return None
+    records = pd.DataFrame(rows)
+    baseline = _portfolio_stats(records["baseline_net"].tolist(), horizon_days, risk_free_annual)
+    filtered = _portfolio_stats(records["filtered_net"].tolist(), horizon_days, risk_free_annual)
+    excess = _series_stats(records["filtered_excess"].tolist())
+    excluded = _series_stats(records["excluded_excess"].tolist())
+    cagr_delta = None
+    max_drawdown_delta = None
+    if baseline and filtered:
+        if baseline["cagr"] is not None and filtered["cagr"] is not None:
+            cagr_delta = float(filtered["cagr"] - baseline["cagr"])
+        max_drawdown_delta = float(filtered["max_drawdown"] - baseline["max_drawdown"])
+    positive_net_excess = bool(excess and excess["mean"] > 0)
+    beats_risk_free = bool(filtered and filtered["cagr"] is not None and filtered["cagr"] > risk_free_annual)
+    non_worse_drawdown = bool(max_drawdown_delta is not None and max_drawdown_delta >= 0)
+    return {
+        "screen_direction": "exclude_lowest_scores",
+        "requested_excluded_fraction": fraction,
+        "average_excluded_fraction": float(records["excluded_fraction"].mean()),
+        "average_total_names": float(records["total_count"].mean()),
+        "average_excluded_names": float(records["excluded_count"].mean()),
+        "round_trip_cost": float(round_trip_cost),
+        "round_trip_cost_bps": float(round_trip_cost * 10000),
+        "risk_free_annual": float(risk_free_annual),
+        "period_count": int(len(records)),
+        "baseline": baseline,
+        "filtered": filtered,
+        "filtered_excess_vs_universe": excess,
+        "excluded_bucket_excess_vs_universe": excluded,
+        "annualized_delta": cagr_delta,
+        "max_drawdown_delta": max_drawdown_delta,
+        "acceptance": {
+            "beats_risk_free": beats_risk_free,
+            "positive_net_excess": positive_net_excess,
+            "non_worse_drawdown": non_worse_drawdown,
+            "passes_period_gate": int(len(records)) >= 24,
+            "passes_performance_gate": bool(
+                beats_risk_free and positive_net_excess and non_worse_drawdown
+            ),
+        },
+    }
+
+
 def _long_only_stats(data: pd.DataFrame, pred_col: str, target_col: str, min_per_date: int,
                      top_k: int, round_trip_cost: float) -> dict | None:
     rows = []
@@ -459,7 +577,8 @@ def _non_overlapping(data: pd.DataFrame, step: int) -> pd.DataFrame:
 
 def _model_metrics(data: pd.DataFrame, pred_col: str, target_cols: list[str],
                    min_per_date: int, non_overlap_step: int, top_k: int,
-                   round_trip_cost: float) -> dict:
+                   round_trip_cost: float, exclude_bottom_fraction: float = 0.10,
+                   risk_free_annual: float = 0.03) -> dict:
     out = {}
     for target_col in target_cols:
         out[target_col] = {
@@ -477,6 +596,16 @@ def _model_metrics(data: pd.DataFrame, pred_col: str, target_cols: list[str],
             "decile": _decile_spread(sampled, pred_col, target_col, min_per_date),
             "long_only": _long_only_stats(
                 sampled, pred_col, target_col, min_per_date, top_k, round_trip_cost,
+            ),
+            "negative_screen": _negative_screen_stats(
+                sampled,
+                pred_col,
+                target_col,
+                min_per_date,
+                exclude_bottom_fraction,
+                round_trip_cost,
+                non_overlap_step,
+                risk_free_annual,
             ),
         }
     return out
@@ -544,6 +673,24 @@ def _fold_long_only_stability(by_fold: dict, target_cols: list[str]) -> dict:
                     for block in by_fold.values()
                 ]
                 out[model_key][target_col][key] = _series_stats(values, include_values=True)
+    return out
+
+
+def _negative_screen_fold_stability(by_fold: dict, target_cols: list[str]) -> dict:
+    out = {}
+    for model_key in ("raw_label_model", "neutral_label_model"):
+        out[model_key] = {}
+        for target_col in target_cols:
+            values = []
+            for block in by_fold.values():
+                model = block.get(model_key) or {}
+                target = (model.get("non_overlapping") or {}).get(target_col) or {}
+                screen = target.get("negative_screen") or {}
+                excess = screen.get("filtered_excess_vs_universe") or {}
+                value = excess.get("mean")
+                if value is not None:
+                    values.append(float(value))
+            out[model_key][target_col] = _series_stats(values, include_values=True)
     return out
 
 
@@ -623,16 +770,30 @@ def _summarize_predictions(preds: pd.DataFrame, root: Path, args: argparse.Names
     report = {
         "raw_label_model": _model_metrics(
             preds, "pred_raw_label", target_cols, args.min_per_date, non_overlap_step,
-            args.top_k, round_trip_cost,
+            args.top_k, round_trip_cost, args.exclude_bottom_fraction, args.risk_free_annual,
         ),
         "neutral_label_model": _model_metrics(
             preds, "pred_neutral_label", target_cols, args.min_per_date, non_overlap_step,
-            args.top_k, round_trip_cost,
+            args.top_k, round_trip_cost, args.exclude_bottom_fraction, args.risk_free_annual,
         ),
         "by_year": {},
         "by_regime": {},
         "by_fold": {},
     }
+    frozen_oos = preds[preds["trade_date"] >= pd.Timestamp("2025-01-01")]
+    if not frozen_oos.empty:
+        report["frozen_oos_2025_2026"] = {
+            "date_start": str(frozen_oos["trade_date"].min().date()),
+            "date_end": str(frozen_oos["trade_date"].max().date()),
+            "raw_label_model": _model_metrics(
+                frozen_oos, "pred_raw_label", target_cols, args.min_per_date, non_overlap_step,
+                args.top_k, round_trip_cost, args.exclude_bottom_fraction, args.risk_free_annual,
+            ),
+            "neutral_label_model": _model_metrics(
+                frozen_oos, "pred_neutral_label", target_cols, args.min_per_date, non_overlap_step,
+                args.top_k, round_trip_cost, args.exclude_bottom_fraction, args.risk_free_annual,
+            ),
+        }
     for fold, group in preds.groupby("fold"):
         report["by_fold"][str(int(fold))] = {
             "rows": int(len(group)),
@@ -641,22 +802,22 @@ def _summarize_predictions(preds: pd.DataFrame, root: Path, args: argparse.Names
             "date_end": str(group["trade_date"].max().date()),
             "raw_label_model": _model_metrics(
                 group, "pred_raw_label", target_cols, args.min_per_date, non_overlap_step,
-                args.top_k, round_trip_cost,
+                args.top_k, round_trip_cost, args.exclude_bottom_fraction, args.risk_free_annual,
             ),
             "neutral_label_model": _model_metrics(
                 group, "pred_neutral_label", target_cols, args.min_per_date, non_overlap_step,
-                args.top_k, round_trip_cost,
+                args.top_k, round_trip_cost, args.exclude_bottom_fraction, args.risk_free_annual,
             ),
         }
     for year, group in preds.groupby(preds["trade_date"].dt.year):
         report["by_year"][str(int(year))] = {
             "raw_label_model": _model_metrics(
                 group, "pred_raw_label", target_cols, args.min_per_date, non_overlap_step,
-                args.top_k, round_trip_cost,
+                args.top_k, round_trip_cost, args.exclude_bottom_fraction, args.risk_free_annual,
             ),
             "neutral_label_model": _model_metrics(
                 group, "pred_neutral_label", target_cols, args.min_per_date, non_overlap_step,
-                args.top_k, round_trip_cost,
+                args.top_k, round_trip_cost, args.exclude_bottom_fraction, args.risk_free_annual,
             ),
         }
     for regime, group in preds.groupby("regime"):
@@ -665,15 +826,18 @@ def _summarize_predictions(preds: pd.DataFrame, root: Path, args: argparse.Names
             "dates": int(group["trade_date"].nunique()),
             "raw_label_model": _model_metrics(
                 group, "pred_raw_label", target_cols, args.min_per_date, non_overlap_step,
-                args.top_k, round_trip_cost,
+                args.top_k, round_trip_cost, args.exclude_bottom_fraction, args.risk_free_annual,
             ),
             "neutral_label_model": _model_metrics(
                 group, "pred_neutral_label", target_cols, args.min_per_date, non_overlap_step,
-                args.top_k, round_trip_cost,
+                args.top_k, round_trip_cost, args.exclude_bottom_fraction, args.risk_free_annual,
             ),
         }
     report["fold_stability"] = _fold_stability(report["by_fold"], target_cols)
     report["long_only_fold_stability"] = _fold_long_only_stability(report["by_fold"], target_cols)
+    report["negative_screen_fold_stability"] = _negative_screen_fold_stability(
+        report["by_fold"], target_cols,
+    )
     return report
 
 
@@ -738,6 +902,45 @@ def _primary_long_only_metrics(metrics: dict, target_col: str) -> dict:
             "top_k": sampled.get("top_k"),
             "top_k_net_excess": sampled.get("top_k_net_excess"),
             "top_k_net_stats": sampled.get("top_k_net_stats"),
+        },
+    }
+
+
+def _primary_negative_screen_metrics(metrics: dict, target_col: str) -> dict:
+    screen = (((metrics.get("neutral_label_model") or {}).get("non_overlapping") or {}).get(target_col) or {}).get("negative_screen") or {}
+    fold_stats = (((metrics.get("negative_screen_fold_stability") or {}).get("neutral_label_model") or {}).get(target_col) or {})
+    frozen_oos = (((((metrics.get("frozen_oos_2025_2026") or {}).get("neutral_label_model") or {}).get("non_overlapping") or {}).get(target_col) or {}).get("negative_screen") or {})
+    acceptance = screen.get("acceptance") or {}
+    frozen_acceptance = frozen_oos.get("acceptance") or {}
+    positive_fold_rate = fold_stats.get("positive_rate")
+    fold_gate = positive_fold_rate is not None and positive_fold_rate >= 0.60
+    frozen_oos_passed = bool(
+        frozen_oos.get("period_count", 0) >= 12
+        and frozen_oos.get("annualized_delta") is not None
+        and frozen_oos.get("annualized_delta") > 0
+        and frozen_acceptance.get("passes_performance_gate")
+    )
+    passed = bool(
+        acceptance.get("passes_performance_gate")
+        and acceptance.get("passes_period_gate")
+        and fold_gate
+        and frozen_oos_passed
+    )
+    return {
+        "model": "neutral_label_model",
+        "target": target_col,
+        "criterion": "exclude lowest model scores, then beat 3% risk-free and equal-weight universe after costs",
+        "status": "RESEARCH_CANDIDATE" if passed else "REJECTED",
+        "negative_screen": screen,
+        "frozen_oos_2025_2026": frozen_oos,
+        "fold_stability": fold_stats,
+        "gate": {
+            "minimum_non_overlapping_periods": 24,
+            "minimum_frozen_oos_periods": 12,
+            "minimum_positive_fold_rate": 0.60,
+            "positive_fold_rate": positive_fold_rate,
+            "frozen_oos_passed": frozen_oos_passed,
+            "passed": passed,
         },
     }
 
@@ -834,7 +1037,10 @@ def main() -> None:
         "non_overlap_step": horizon,
         "top_k": int(args.top_k),
         "round_trip_cost_bps": float(args.round_trip_cost_bps),
+        "exclude_bottom_fraction": float(args.exclude_bottom_fraction),
+        "risk_free_annual": float(args.risk_free_annual),
         "primary_long_only_metric": _primary_long_only_metrics(metrics, args.target),
+        "primary_negative_screen_metric": _primary_negative_screen_metrics(metrics, args.target),
         "metrics": metrics,
     }
     output = Path(args.output).expanduser() if args.output else root / "neutralized_walk_forward_report.json"

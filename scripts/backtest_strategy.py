@@ -56,7 +56,32 @@ _COMPOSITE_SIGN = {
 }
 
 
-def _load(history_dir: Path, target: str, hold: int):
+_BENCHMARK_NAMES = {
+    "sh000300": "CSI300",
+    "sh000905": "CSI500",
+}
+
+
+def _benchmark_label(index_code: str) -> str:
+    return _BENCHMARK_NAMES.get(index_code, index_code)
+
+
+def _load_benchmark(history_dir: Path, index_code: str, hold: int) -> dict:
+    import pandas as pd
+
+    path = history_dir / f"market_{index_code}.parquet"
+    if not path.exists():
+        raise SystemExit(
+            f"基准数据缺失: {path}（先运行 STOCKWATCH_BENCHMARK_ONLY=true scripts/bootstrap_history.py）"
+        )
+    benchmark = pd.read_parquet(path, columns=["trade_date", "close"]).copy()
+    benchmark["trade_date"] = pd.to_datetime(benchmark["trade_date"])
+    benchmark = benchmark.sort_values("trade_date").reset_index(drop=True)
+    benchmark["fwd"] = benchmark["close"].shift(-hold) / benchmark["close"] - 1
+    return dict(zip(benchmark["trade_date"], benchmark["fwd"]))
+
+
+def _load(history_dir: Path, target: str, hold: int, benchmark_code: str = "sh000300"):
     import numpy as np
     import pandas as pd
     import pyarrow.parquet as pq
@@ -72,19 +97,17 @@ def _load(history_dir: Path, target: str, hold: int):
     df["trade_date"] = pd.to_datetime(df["trade_date"])
     df = df.sort_values("trade_date").reset_index(drop=True)
 
-    csi_path = history_dir / "market_sh000300.parquet"
-    csi_fwd = {}
-    if csi_path.exists():
-        csi = pd.read_parquet(csi_path)[["trade_date", "close"]].copy()
+    regime_path = history_dir / "market_sh000300.parquet"
+    if regime_path.exists():
+        csi = pd.read_parquet(regime_path)[["trade_date", "close"]].copy()
         csi["trade_date"] = pd.to_datetime(csi["trade_date"])
         csi = csi.sort_values("trade_date").reset_index(drop=True)
-        csi["fwd"] = csi["close"].shift(-hold) / csi["close"] - 1
-        csi_fwd = dict(zip(csi["trade_date"], csi["fwd"]))
         csi["bull"] = is_bull_trend(csi["close"]).to_numpy()
         df["bull"] = df["trade_date"].map(dict(zip(csi["trade_date"], csi["bull"])))
     else:
         df["bull"] = True
-    return df, feats, csi_fwd
+    benchmark_fwd = _load_benchmark(history_dir, benchmark_code, hold)
+    return df, feats, benchmark_fwd
 
 
 def _predict(df, model_path: Path, fallback_feats):
@@ -148,7 +171,8 @@ def _per_year_ic(df, target):
             print("  %-6d %+9.4f %+7.2f %8.2f %6d" % (y, s.mean(), icir, (s > 0).mean(), len(s)))
 
 
-def _backtest(df, target, csi_fwd, hold, topk, cost, rf_annual, test_start, bear_exposure=1.0):
+def _backtest(df, target, benchmark_fwd, benchmark_name, hold, topk, cost,
+              rf_annual, test_start, bear_exposure=1.0):
     import numpy as np
     import pandas as pd
 
@@ -164,6 +188,9 @@ def _backtest(df, target, csi_fwd, hold, topk, cost, rf_annual, test_start, bear
             g = df[df["trade_date"] == d]
             if len(g) < topk * 2 or g["score"].nunique() <= 1:
                 continue
+            benchmark_return = benchmark_fwd.get(pd.Timestamp(d))
+            if benchmark_return is None or pd.isna(benchmark_return):
+                continue
             top = g.sort_values("score", ascending=False).head(topk)
             sel = set(top["code"])
             turn = 1.0 if not prev else 1 - len(prev & sel) / topk
@@ -173,7 +200,7 @@ def _backtest(df, target, csi_fwd, hold, topk, cost, rf_annual, test_start, bear
             exposure = 1.0 if is_bull else bear_exposure
             port.append(exposure * basket + (1 - exposure) * rf_per)
             uni.append(g[target].mean())
-            bench.append(csi_fwd.get(pd.Timestamp(d), np.nan))
+            bench.append(float(benchmark_return))
             prev = sel
             dq = (g["score"].rank(pct=True) * 10).clip(upper=9).astype(int)
             dec_rows.append(g.assign(dec=dq).groupby("dec")[target].mean())
@@ -181,7 +208,7 @@ def _backtest(df, target, csi_fwd, hold, topk, cost, rf_annual, test_start, bear
             print("\n=== %s: 样本不足 ===" % label)
             return
         port = np.array(port); uni = np.array(uni)
-        bench = pd.Series(bench).fillna(pd.Series(uni)).to_numpy()
+        bench = np.array(bench)
         n = len(port); pa = 252 / hold
         cagr = lambda r: np.prod(1 + r) ** (pa / n) - 1
         c = np.cumprod(1 + port); peak = np.maximum.accumulate(c)
@@ -192,10 +219,11 @@ def _backtest(df, target, csi_fwd, hold, topk, cost, rf_annual, test_start, bear
             label, n, hold, topk, cost * 100))
         print("  策略    : CAGR=%+.2f%%  年化波动=%.2f%%  Sharpe=%+.2f  最大回撤=%+.2f%%" % (
             cagr(port) * 100, port.std() * np.sqrt(pa) * 100, sharpe, maxdd * 100))
-        print("  CSI300  : CAGR=%+.2f%%   |   等权universe: CAGR=%+.2f%%   |   无风险: %.1f%%/年" % (
-            cagr(bench) * 100, cagr(uni) * 100, rf_annual * 100))
-        print("  跑赢无风险的持有期占比: %.0f%%   跑赢CSI300: %.0f%%   跑赢universe: %.0f%%" % (
-            (port > rf_per).mean() * 100, (port > bench).mean() * 100, (port > uni).mean() * 100))
+        print("  %-8s: CAGR=%+.2f%%   |   等权universe: CAGR=%+.2f%%   |   无风险: %.1f%%/年" % (
+            benchmark_name, cagr(bench) * 100, cagr(uni) * 100, rf_annual * 100))
+        print("  跑赢无风险的持有期占比: %.0f%%   跑赢%s: %.0f%%   跑赢universe: %.0f%%" % (
+            (port > rf_per).mean() * 100, benchmark_name,
+            (port > bench).mean() * 100, (port > uni).mean() * 100))
         print("  分位前向收益 0(低分)->9(高分): " + " ".join("%+.3f" % dec.get(i, float("nan")) for i in range(10)))
         print("  decile 9-0 spread = %+.4f" % (dec.get(9) - dec.get(0)))
 
@@ -237,21 +265,33 @@ def main(argv=None):
     p.add_argument("--hold", type=int, default=20, help="每个持有期的交易日数（=横截面非重叠采样步长）")
     p.add_argument("--topk", type=int, default=50)
     p.add_argument("--cost", type=float, default=0.0030, help="双边换手成本，默认 0.30%%")
-    p.add_argument("--rf", type=float, default=0.02, help="无风险年化，默认 2%%")
+    p.add_argument("--rf", type=float, default=0.03, help="无风险年化，默认 3%%")
+    p.add_argument("--benchmark-code", default="sh000905", help="基准指数代码，默认 sh000905（中证500）")
     p.add_argument("--test-start", default="2025-01-01", help="样本外起始日")
     p.add_argument("--bear-exposure", type=float, default=1.0,
                    help="年线下（熊市）总仓位，0-1，其余视为无风险。降回撤的研究档位，默认 1.0（不减仓）")
     args = p.parse_args(argv)
 
     history_dir = Path(args.history_dir).expanduser()
-    df, feats, csi_fwd = _load(history_dir, args.target, args.hold)
+    df, feats, benchmark_fwd = _load(history_dir, args.target, args.hold, args.benchmark_code)
     df, desc = _score(df, feats, args.signal, Path(args.model_path).expanduser())
     print("信号: %s   |   特征数: %d   |   样本: %d 行, %s ~ %s" % (
         desc, len(feats), len(df), df["trade_date"].min().date(), df["trade_date"].max().date()))
     _per_year_ic(df, args.target)
     if args.signal == "regime" and "score_univ" in df.columns:
         _per_regime_compare(df, args.target)
-    _backtest(df, args.target, csi_fwd, args.hold, args.topk, args.cost, args.rf, args.test_start, args.bear_exposure)
+    _backtest(
+        df,
+        args.target,
+        benchmark_fwd,
+        _benchmark_label(args.benchmark_code),
+        args.hold,
+        args.topk,
+        args.cost,
+        args.rf,
+        args.test_start,
+        args.bear_exposure,
+    )
     return 0
 
 

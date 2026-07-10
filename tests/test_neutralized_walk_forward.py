@@ -4,13 +4,16 @@ import sys
 
 import numpy as np
 import pandas as pd
+import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from scripts.evaluate_neutralized_walk_forward import (
     _long_only_stats,
     _merge_sector_exposure,
+    _negative_screen_stats,
     _non_overlapping,
+    _primary_negative_screen_metrics,
     make_walk_forward_folds,
     neutralize_by_date,
 )
@@ -94,6 +97,102 @@ def test_long_only_stats_reports_top_bucket_net_excess():
     assert stats["top_decile_excess"] == expected_top - expected_universe
     assert stats["top_decile_net_excess"] == expected_top - expected_universe - 0.002
     assert stats["top_k"] == 5
+
+
+def test_negative_screen_stats_excludes_low_score_losers():
+    rows = []
+    for date in pd.to_datetime(["2024-01-02", "2024-01-30", "2024-02-27"]):
+        for idx in range(100):
+            rows.append({
+                "trade_date": date,
+                "pred": float(idx),
+                "target": -0.10 if idx < 10 else 0.02,
+            })
+    data = pd.DataFrame(rows)
+
+    stats = _negative_screen_stats(
+        data,
+        "pred",
+        "target",
+        min_per_date=30,
+        exclude_bottom_fraction=0.10,
+        round_trip_cost=0.002,
+        horizon_days=20,
+        risk_free_annual=0.03,
+    )
+
+    assert stats is not None
+    assert stats["period_count"] == 3
+    assert stats["average_excluded_fraction"] == pytest.approx(0.10)
+    assert stats["filtered_excess_vs_universe"]["mean"] == pytest.approx(0.012)
+    assert stats["excluded_bucket_excess_vs_universe"]["mean"] == pytest.approx(-0.108)
+    assert stats["filtered"]["cagr"] > stats["baseline"]["cagr"]
+    assert stats["acceptance"]["beats_risk_free"] is True
+
+
+def test_negative_screen_stats_rejects_non_predictive_exclusion():
+    rows = []
+    for date in pd.to_datetime(["2024-01-02", "2024-01-30", "2024-02-27"]):
+        for idx in range(100):
+            rows.append({
+                "trade_date": date,
+                "pred": float(idx),
+                "target": 0.01,
+            })
+    data = pd.DataFrame(rows)
+
+    stats = _negative_screen_stats(
+        data,
+        "pred",
+        "target",
+        min_per_date=30,
+        exclude_bottom_fraction=0.10,
+        round_trip_cost=0.002,
+        horizon_days=20,
+        risk_free_annual=0.03,
+    )
+
+    assert stats is not None
+    assert stats["filtered_excess_vs_universe"]["mean"] == pytest.approx(0.0)
+    assert stats["acceptance"]["positive_net_excess"] is False
+
+
+def test_primary_negative_screen_requires_recent_frozen_oos_to_pass():
+    passing_screen = {
+        "period_count": 35,
+        "annualized_delta": 0.01,
+        "acceptance": {
+            "passes_performance_gate": True,
+            "passes_period_gate": True,
+        },
+    }
+    failing_oos = {
+        "period_count": 18,
+        "annualized_delta": -0.02,
+        "acceptance": {
+            "passes_performance_gate": False,
+            "passes_period_gate": False,
+            "positive_net_excess": False,
+        },
+    }
+    metrics = {
+        "neutral_label_model": {
+            "non_overlapping": {"forward_20d_return": {"negative_screen": passing_screen}},
+        },
+        "negative_screen_fold_stability": {
+            "neutral_label_model": {"forward_20d_return": {"positive_rate": 2 / 3}},
+        },
+        "frozen_oos_2025_2026": {
+            "neutral_label_model": {
+                "non_overlapping": {"forward_20d_return": {"negative_screen": failing_oos}},
+            },
+        },
+    }
+
+    result = _primary_negative_screen_metrics(metrics, "forward_20d_return")
+
+    assert result["status"] == "REJECTED"
+    assert result["gate"]["frozen_oos_passed"] is False
 
 
 def test_merge_sector_exposure_uses_historical_asof_dates(tmp_path):

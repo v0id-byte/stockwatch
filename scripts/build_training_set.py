@@ -36,6 +36,40 @@ def _env_bool(name: str, default: bool) -> bool:
 FUNDAMENTAL_FEATURES = ["ocf_to_eps"]
 
 
+def _training_stock_paths(root: Path, stock_dir: Path) -> tuple[list[Path], dict]:
+    paths = sorted(stock_dir.glob("*.parquet"))
+    manifest_path = root / "history_manifest.json"
+    if not manifest_path.exists():
+        return paths, {
+            "source": "stock_directory_legacy_fallback",
+            "membership_kind": "unknown",
+            "path_count": len(paths),
+        }
+    try:
+        manifest = __import__("json").loads(manifest_path.read_text())
+    except Exception:
+        return paths, {
+            "source": "stock_directory_legacy_fallback",
+            "membership_kind": "unknown",
+            "path_count": len(paths),
+        }
+    codes = {str(code).zfill(6) for code in manifest.get("codes") or []}
+    if not codes:
+        return paths, {
+            "source": "stock_directory_legacy_fallback",
+            "membership_kind": str(manifest.get("constituent_membership_kind") or "unknown"),
+            "path_count": len(paths),
+        }
+    selected = [path for path in paths if path.stem in codes]
+    return selected, {
+        "source": "history_manifest.codes",
+        "membership_kind": str(manifest.get("constituent_membership_kind") or "unknown"),
+        "manifest_code_count": len(codes),
+        "path_count": len(selected),
+        "ignored_stale_path_count": len(paths) - len(selected),
+    }
+
+
 def _merge_fundamental(data, root):
     """Strict point-in-time as-of merge of fundamental features by announcement date.
 
@@ -102,7 +136,8 @@ def main():
 
     frames = []
     skipped = []
-    for path in tqdm(sorted(stock_dir.glob("*.parquet")), desc="factors"):
+    stock_paths, universe_meta = _training_stock_paths(root, stock_dir)
+    for path in tqdm(stock_paths, desc="factors"):
         code = path.stem
         kline = pd.read_parquet(path)
         min_rows = WARMUP + max(horizons) + 10
@@ -167,6 +202,7 @@ def main():
         "per_date_min_codes": int(per_date.min()),
         "per_date_median_codes": float(per_date.median()),
         "per_date_max_codes": int(per_date.max()),
+        "universe_membership": universe_meta,
         "skipped": skipped[:50],
         "skipped_count": len(skipped),
     }

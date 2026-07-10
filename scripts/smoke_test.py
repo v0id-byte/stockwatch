@@ -23,7 +23,7 @@ def main():
     ]:
         os.environ.setdefault(name, "true")
 
-    from main import once
+    from core.runner import once
     once()
 
 

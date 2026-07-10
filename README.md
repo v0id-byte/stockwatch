@@ -523,6 +523,14 @@ python scripts/train_lgbm.py
 scp models/lgbm.* <user>@<host>:~/.stockwatch/models/
 ```
 
+只刷新回测基准、不重下个股历史时，可运行：
+
+```bash
+STOCKWATCH_BENCHMARK_ONLY=true python scripts/bootstrap_history.py
+```
+
+bootstrap 会同时缓存沪深300与中证500，并把本次指数成分精确代码清单写入 manifest；训练集只读取该清单内的 parquet，避免旧下载文件悄悄改变 universe。成分清单仍标记为 `current_snapshot_not_point_in_time`，不能冒充逐日历史成分。
+
 部署端只在 `ENABLE_LGBM=true` 时加载模型；模型缺失会记录日志并跳过。模型加载还会读取 `lgbm_meta.json` 的真样本外健康检查：若 `test return IC < 0` 或 `decile 9-0 spread < 0`，线上推理会拒绝输出 LightGBM 排序分，避免把失败模型喂给决策引擎。研究调试时可临时设 `STOCKWATCH_LGBM_ALLOW_UNVALIDATED=true` 覆盖该门禁。
 训练脚本会按标签周期在 train/validation/test 边界做 purge，避免 20 日前瞻标签跨边界泄漏。
 `lgbm_meta.json` 里的 top-k 收益是逐交易日的前瞻收益均值，不是账户累计收益；同时会输出 IC、return-IC、十分位收益、非重叠抽样诊断，以及**逐年横截面 IC**（`per_year_ic`）。
@@ -594,7 +602,7 @@ STOCKWATCH_ENABLE_PROPAGATION_FEATURES=false python scripts/build_training_set.p
 
 ### 量化信号回测（诚实、可复现）
 
-`lgbm_meta.json` 的 train/val/test 指标只落在一段最近行情上，容易以偏概全。用回测脚本看**逐年 IC + 非重叠持有期组合**的全貌，对比 CSI300 与无风险：
+`lgbm_meta.json` 的 train/val/test 指标只落在一段最近行情上，容易以偏概全。用回测脚本看**逐年 IC + 非重叠持有期组合**的全貌，默认对比中证500、等权 universe 与 3% 无风险门槛：
 
 ```bash
 python main.py backtest --signal model        # 用训练好的模型打分
@@ -602,7 +610,7 @@ python main.py backtest --signal composite     # 不依赖模型文件，用 rob
 python main.py backtest --signal regime        # 牛熊分模型（熊市用 lgbm_bear，牛市用通用），含牛/熊分段 IC 对比
 ```
 
-输出包含：逐年横截面 IC（方向是否每年都对）、非重叠 20 日持有期的 top-k 多头组合（扣双边成本）相对 CSI300、等权universe、无风险的 CAGR / 波动 / Sharpe / 最大回撤 / 跑赢占比，以及分位前向收益。`--signal regime` 还会打印牛市日 / 熊市日各自的 regime-aware vs 通用模型 IC 对比。CSI300 基准会跟随 `--hold` 调整前向收益窗口；非默认持有期下请同步用 `--hold N` 重建训练集。
+输出包含：逐年横截面 IC（方向是否每年都对）、非重叠 20 日持有期的 top-k 多头组合（扣双边成本）相对 CSI500、等权 universe、无风险的 CAGR / 波动 / Sharpe / 最大回撤 / 跑赢占比，以及分位前向收益。基准缺失会直接报错，不再用 universe 静默代替；可用 `--benchmark-code sh000300` 显式切回沪深300。`--signal regime` 还会打印牛市日 / 熊市日各自的 regime-aware vs 通用模型 IC 对比。
 
 #### 降回撤研究：验证了一圈，只有"减仓"真有用（诚实结论）
 
@@ -642,6 +650,8 @@ python main.py backtest --signal regime --bear-exposure 0.5   # 年线下只用�
 `build_neutralization_exposures.py` 会从 AKShare 股本结构缓存每只股票的历史总股本/流通 A 股，再和本地日线 close 做 as-of 合并，生成日频 `market_cap_daily.parquet`；申万行业优先拉历史分类，失败时退到申万一级当前成分，并在报告里标成 `static_current` 局限。诊断报告输出到 `~/.stockwatch/history/neutralized_walk_forward_report.json`，内置 `leakage_audit`，并新增 `primary_long_only_metric` / `long_only_fold_stability`：主指标不再是 IC，而是 `decile_9` 或 `top-k` 扣除 `--round-trip-cost-bps` 后，相对等权 universe 的逐折超额。
 
 Pi 全量复核（2026-06-16）里，日频市值覆盖 2296/2348 只、训练样本 1283974 行；申万历史分类未取到，行业使用申万一级当前成分，报告标为 `static_current`，所以这仍不是完美历史行业 PIT。加入 `log_market_cap + 行业 + 技术风格` 后，neutral-label 模型对 `neutral_return` 的 daily IC 仍有 +0.0526、ICIR 0.92，20 日非重叠 residual IC +0.0624、ICIR 1.00，逐 fold residual IC 12/12 为正。但真正可交易的 long-only 主指标失败：原始收益 `decile_9` 扣 20bps 后相对等权 universe 为 −0.91%，`top50` 为 −1.09%；非重叠口径分别为 −1.38% / −1.67%；逐 fold 顶档净超额均值 −1.00%，只有 3/12 折为正。结论：**这条信号最多是负面筛选/黑名单候选，不是可买 top-k 的 long-only 排序。**
+
+2026-07-09 又把“负面筛选”单独做了确认性检验：每 20 日排除 neutral-label 最低 10%，20bps 成本、3% 无风险门槛、12-fold walk-forward。全期表面年化增量为 +1.22%，但冻结 OOS 2025-2026 变成 **−0.56%**，最近 fold 约 **−0.72%/20日**；最终 `primary_negative_screen_metric.status=REJECTED`。这条旧技术信号既不能买赢家，也不能稳定排除输家，停止深化且不接入生产。
 
 > 诚实边界：这是**长多、相对收益**的横截面研究，仍是股票 beta——熊市会有回撤。历史样本内或部分年份的正 IC 不等于最新真样本外可用；2026 的强动量行情对反转/超跌类因子是逆风。它不构成「永远跑赢无风险、低波动」的绝对收益承诺，也不连接券商、不下单。
 
@@ -1098,6 +1108,10 @@ Every recent direction should be validated on local A-share history before being
 
 The Pi full rerun on 2026-06-16 covered 2296/2348 names with daily market cap and 1283974 training rows. Shenwan historical membership was unavailable, so sector exposure uses current Shenwan first-level constituents and is marked `static_current`; this is still not perfect historical sector PIT. After adding `log_market_cap + sector + technical style` controls, the neutral-label model still has +0.0526 daily IC versus `neutral_return` (ICIR 0.92), +0.0624 non-overlapping residual IC (ICIR 1.00), and positive residual IC in 12/12 folds. The tradeable long-only metric fails: raw-return `decile_9` net excess versus the equal-weight universe is −0.91% after 20 bps, `top50` is −1.09%, and the non-overlapping view is −1.38% / −1.67%; fold-level top-decile net excess averages −1.00% with only 3/12 positive folds. Treat this as a negative-screening / blacklist candidate, not a buyable top-k long-only ranker.
 
+The 2026-07-09 confirmatory negative-screen run excluded the lowest 10% neutral-label scores every 20 trading days, with 20 bps cost, a 3% risk-free hurdle, and 12 walk-forward folds. The full-period annualized delta looked positive at +1.22%, but the frozen 2025-2026 OOS delta was **−0.56%** and the latest fold was about **−0.72% per 20 days**. The report therefore sets `primary_negative_screen_metric.status=REJECTED`: the old technical signal is neither a reliable winner selector nor a stable loser filter, so it remains out of production.
+
+Strategy backtests now default to the real CSI500 benchmark (`--benchmark-code sh000905`) and fail when benchmark data is missing instead of silently substituting the equal-weight universe. Use `--benchmark-code sh000300` only when an explicit CSI300 comparison is intended.
+
 **Event layer (`ENABLE_EVENTS=true`, `analysis/events.py`)** — because events still matter for *risk/context*, not prediction. It pulls structured events (lockup calendar, earnings preannouncements, insider trades, buybacks), flags each as a plain-language risk/info note, and feeds them into the daily analysis and stock Q&A. With `ENABLE_SECTOR=true` it also adds **sector-propagation (连带)** notes — same-sector peers with events — explicitly labelled as sentiment context (the measured sympathy effect is only ~+0.04% next-day, so it is never presented as a price prediction). Nothing here is a buy/sell instruction or a return forecast.
 
 For PIT announcement-feature research, keep the heavy CNINFO fetch as Stage 1 and feature building as Stage 2:
@@ -1125,6 +1139,14 @@ python scripts/bootstrap_history.py
 python scripts/build_training_set.py
 python scripts/train_lgbm.py
 ```
+
+Refresh benchmark history without redownloading every stock:
+
+```bash
+STOCKWATCH_BENCHMARK_ONLY=true python scripts/bootstrap_history.py
+```
+
+Bootstrap caches both CSI300 and CSI500 and records the exact constituent snapshot in the manifest. Training reads only those listed parquet files so stale downloads cannot silently change the universe. The snapshot remains labelled `current_snapshot_not_point_in_time`; it is not historical daily membership.
 
 Copy `models/lgbm.txt` and `models/lgbm_meta.json` to the deployment machine under `~/.stockwatch/models/`, then set `ENABLE_LGBM=true`. The model still will not be used unless the meta file passes the health gate above. For research-only debugging, set `STOCKWATCH_LGBM_ALLOW_UNVALIDATED=true`.
 
