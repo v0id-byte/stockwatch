@@ -210,6 +210,29 @@ class TestSecondReviewFixes:
         )
         assert "未通过样本外验证" in out["000001"]
 
+    def test_lgbm_disables_unknown_health_by_default(self, tmp_path, monkeypatch):
+        import json
+        import sys
+        import types
+        from analysis.lgbm import LgbmRanker
+
+        class Booster:
+            def __init__(self, model_file):
+                self.model_file = model_file
+            def feature_name(self):
+                return ["fallback"]
+
+        monkeypatch.delenv("STOCKWATCH_LGBM_ALLOW_UNVALIDATED", raising=False)
+        monkeypatch.setitem(sys.modules, "lightgbm", types.SimpleNamespace(Booster=Booster))
+        (tmp_path / "lgbm.txt").write_text("model")
+        (tmp_path / "lgbm_meta.json").write_text(json.dumps({"features": ["unknown"]}))
+
+        ranker = LgbmRanker(tmp_path / "lgbm.txt")
+
+        assert ranker.model_health["status"] == "UNKNOWN"
+        assert ranker.model is None
+        assert "缺少样本外" in ranker.unavailable_context()
+
     def test_lgbm_uses_model_specific_meta_path(self, tmp_path, monkeypatch):
         import json
         import types

@@ -65,6 +65,7 @@ def evaluate_model_health(meta: dict) -> dict:
         status = "UNVALIDATED"
     elif return_ic is None and decile_spread is None:
         status = "UNKNOWN"
+        failures = ["缺少样本外 return IC 和 decile spread 指标"]
     else:
         status = "VALIDATED"
     return {
@@ -104,7 +105,7 @@ class LgbmRanker:
             else:
                 self.meta = {"features": self.model.feature_name()}
             self.model_health = evaluate_model_health(self.meta)
-            if self.model_health["status"] == "UNVALIDATED" and not _env_bool("STOCKWATCH_LGBM_ALLOW_UNVALIDATED", False):
+            if self.model_health["status"] != "VALIDATED" and not _env_bool("STOCKWATCH_LGBM_ALLOW_UNVALIDATED", False):
                 reason = "；".join(self.model_health["failures"])
                 self.disabled_context = f"LightGBM 排序模型预测: 未通过样本外验证，跳过（{reason}）"
                 logger.warning(f"LightGBM 模型未通过样本外验证，禁用推理: {reason}")
