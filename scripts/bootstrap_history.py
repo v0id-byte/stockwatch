@@ -86,6 +86,39 @@ def _normalize_history(pd, raw, adjusted, source: str):
         out["volume"] = out["volume_lots"] * 100.0
         out["turnover_pct"] = pd.to_numeric(out["turnover_pct"], errors="coerce")
         out["turnover"] = out["turnover_pct"] / 100.0
+    elif source == "baostock":
+        # Baostock is the only free source that keeps delisted stocks' full
+        # history; volume is in shares and turn is a percentage.
+        raw_columns = {
+            "date": "trade_date", "open": "open", "high": "high",
+            "low": "low", "close": "close", "volume": "volume",
+            "amount": "amount", "turn": "turnover_pct",
+        }
+        adjusted_columns = {
+            "date": "trade_date", "open": "adj_open", "high": "adj_high",
+            "low": "adj_low", "close": "adj_close",
+        }
+        missing = set(raw_columns) - set(raw.columns)
+        adjusted_missing = set(adjusted_columns) - set(adjusted.columns)
+        if missing or adjusted_missing:
+            raise ValueError(
+                f"Baostock history schema mismatch: raw_missing={sorted(missing)}, "
+                f"hfq_missing={sorted(adjusted_missing)}"
+            )
+        out = raw[list(raw_columns)].rename(columns=raw_columns).copy()
+        adj = adjusted[list(adjusted_columns)].rename(columns=adjusted_columns).copy()
+        for column in ("open", "high", "low", "close", "volume", "amount", "turnover_pct"):
+            out[column] = pd.to_numeric(out[column], errors="coerce")
+        # Baostock emits placeholder rows on suspension days (zero/empty price
+        # or volume).  Other sources emit no bar at all; align on that so the
+        # PIT layer sees a gap and resolves it through suspension evidence.
+        out = out[(out["close"] > 0) & (out["volume"] > 0) & (out["amount"] > 0)]
+        out["turnover_pct"] = out["turnover_pct"].fillna(0.0)
+        out["turnover"] = out["turnover_pct"] / 100.0
+        out["volume_lots"] = out["volume"] / 100.0
+        for column in ("adj_open", "adj_high", "adj_low", "adj_close"):
+            adj[column] = pd.to_numeric(adj[column], errors="coerce")
+        adj = adj[adj["adj_close"] > 0]
     elif source == "sina":
         raw_columns = {
             "date": "trade_date", "open": "open", "high": "high",
@@ -130,6 +163,10 @@ def _normalize_history(pd, raw, adjusted, source: str):
     adj = adj.dropna(subset=["trade_date"]).drop_duplicates("trade_date", keep="last")
     out = out.merge(adj, on="trade_date", how="left", validate="one_to_one")
     out = out.sort_values("trade_date").reset_index(drop=True)
+    # Some sources (Sina, Baostock) emit zero-volume placeholder rows on
+    # suspension days.  A bar means actual trading; gaps are resolved by the
+    # PIT layer's suspension evidence, uniformly across sources.
+    out = out[(out["volume"] > 0) & (out["amount"] > 0)].reset_index(drop=True)
     if out[["adj_open", "adj_high", "adj_low", "adj_close"]].isna().any().any():
         raise ValueError("HFQ history does not cover every raw-price trade date")
     price_columns = [
@@ -252,6 +289,53 @@ def _download_sina(ak, pd, code, start, end):
     return None if out.empty else out
 
 
+BAOSTOCK_LOCK = Lock()
+_BAOSTOCK_STATE = {"ready": False}
+
+
+def _download_baostock(pd, code, start, end):
+    """Last-resort source: the only free feed that serves delisted stocks."""
+    try:
+        import baostock as bs
+    except ImportError:
+        return None
+    prefix = "sh" if code.startswith(("5", "6", "9")) else "sz"
+    symbol = f"{prefix}.{code}"
+    start_iso = f"{start[:4]}-{start[4:6]}-{start[6:]}"
+    end_iso = f"{end[:4]}-{end[4:6]}-{end[6:]}"
+    fields = "date,open,high,low,close,volume,amount,turn"
+
+    with BAOSTOCK_LOCK:
+        if not _BAOSTOCK_STATE["ready"]:
+            login = bs.login()
+            if getattr(login, "error_code", "1") != "0":
+                return None
+            _BAOSTOCK_STATE["ready"] = True
+
+        def _query(adjust_flag):
+            rs = bs.query_history_k_data_plus(
+                symbol, fields, start_date=start_iso, end_date=end_iso,
+                frequency="d", adjustflag=adjust_flag,
+            )
+            if getattr(rs, "error_code", "1") != "0":
+                return None
+            rows = []
+            while rs.next():
+                rows.append(rs.get_row_data())
+            return pd.DataFrame(rows, columns=rs.fields) if rows else None
+
+        raw = _query("3")
+        adjusted = _query("1")
+    if raw is None or raw.empty or adjusted is None or adjusted.empty:
+        return None
+    try:
+        out = _normalize_history(pd, raw, adjusted, "baostock")
+    except (KeyError, ValueError):
+        return None
+    out = _filter_dates(out, start, end)
+    return None if out.empty else out
+
+
 def _download_one(ak, pd, code, start, end, mapping_fn=None, max_retries=1):
     """下载单只股票历史行情，带重试和基础行数校验。"""
     last_error = None
@@ -275,6 +359,9 @@ def _download_one(ak, pd, code, start, end, mapping_fn=None, max_retries=1):
     fallback = _download_sina(ak, pd, code, start, end)
     if fallback is not None:
         return fallback, "sina"
+    fallback = _download_baostock(pd, code, start, end)
+    if fallback is not None:
+        return fallback, "baostock"
     # Tencent's endpoint used here exposes qfq OHLC without turnover/amount.
     # Accepting it would silently reintroduce mixed units, so history fails
     # closed after the paired raw/HFQ sources are exhausted.
@@ -377,11 +464,47 @@ def _pit_universe_scope(
     return codes, meta
 
 
+def _download_index_baostock(pd, index_code: str, start: str, end: str):
+    """Benchmark fallback when the EastMoney index endpoint throttles this IP."""
+    try:
+        import baostock as bs
+    except ImportError:
+        return None
+    symbol = f"{index_code[:2]}.{index_code[2:]}"
+    with BAOSTOCK_LOCK:
+        if not _BAOSTOCK_STATE["ready"]:
+            login = bs.login()
+            if getattr(login, "error_code", "1") != "0":
+                return None
+            _BAOSTOCK_STATE["ready"] = True
+        rs = bs.query_history_k_data_plus(
+            symbol, "date,open,high,low,close,volume,amount",
+            start_date=f"{start[:4]}-{start[4:6]}-{start[6:]}",
+            end_date=f"{end[:4]}-{end[4:6]}-{end[6:]}",
+            frequency="d",
+        )
+        if getattr(rs, "error_code", "1") != "0":
+            return None
+        rows = []
+        while rs.next():
+            rows.append(rs.get_row_data())
+    if not rows:
+        return None
+    frame = pd.DataFrame(rows, columns=rs.fields)
+    for column in ("open", "high", "low", "close", "volume", "amount"):
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    return frame.rename(columns={"date": "trade_date"})
+
+
 def _save_benchmarks(ak, pd, root: Path, start: str, end: str) -> dict[str, int]:
     counts = {}
     for index_code in BENCHMARK_INDEX_CODES:
         symbol = BENCHMARK_AKSHARE_SYMBOLS[index_code]
-        raw = ak.stock_zh_index_daily_em(symbol=symbol, start_date=start, end_date=end)
+        try:
+            raw = ak.stock_zh_index_daily_em(symbol=symbol, start_date=start, end_date=end)
+        except Exception as exc:
+            print(f"基准指数 EastMoney 失败 {index_code}，回退 baostock: {exc}")
+            raw = _download_index_baostock(pd, index_code, start, end)
         if raw is None or raw.empty:
             raise RuntimeError(f"基准指数下载失败: {index_code}")
         frame = raw.rename(columns={
