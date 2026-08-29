@@ -27,15 +27,49 @@ from bs4 import BeautifulSoup
 
 EXTRACTOR_VERSION = "csi500_membership_normalize_v1"
 INDEX_CODE = "000905"
-EFFECTIVE_RE = re.compile(
-    r"于\s*(20\d{2})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日\s*收市后生效"
-)
+# Matched against whitespace-stripped text: the CSI CMS inserts spaces inside
+# numbers ("中证 1 000", "2 025年") in newer announcements.
+EFFECTIVE_RE = re.compile(r"于(20\d{2})年(\d{1,2})月(\d{1,2})日收市后生效")
 SECTION_RE = re.compile(r"中证\s*(\d+)\s*指数样本(?:临时)?调整名单")
 CODE_RE = re.compile(r"(?<!\d)(\d{6})(?!\d)")
 
 
 class PITSourceError(RuntimeError):
     """Official source is incomplete or internally inconsistent."""
+
+
+# Exchange code changes are administrative substitutions inside an index: no
+# rebalance announcement is published, so the reverse replay chain breaks
+# unless old codes are canonicalized to the current code space.  Each entry
+# needs official evidence.  Membership output uses the CURRENT code for the
+# whole span (price vendors serve the merged history under the new code).
+CODE_CHANGES = (
+    {
+        "old": "300114",
+        "new": "302132",
+        "effective": "2025-02-17",
+        "evidence": (
+            "中航电测重组更名中航成飞并变更证券代码 300114→302132；"
+            "https://www.cnindex.com.cn/zh_information/notices_news/2025/202502/"
+            "P020250212310734081331.pdf"
+        ),
+    },
+)
+
+
+def _canonical_code_map() -> dict[str, str]:
+    mapping = {item["old"]: item["new"] for item in CODE_CHANGES}
+    # Follow chains (A->B, B->C) and refuse cycles.
+    for old in list(mapping):
+        seen = {old}
+        target = mapping[old]
+        while target in mapping:
+            if target in seen:
+                raise PITSourceError(f"code-change cycle at {old}")
+            seen.add(target)
+            target = mapping[target]
+        mapping[old] = target
+    return mapping
 
 
 @dataclass(frozen=True)
@@ -141,7 +175,7 @@ def _read_current_weight_snapshot(data: bytes, entry: dict) -> pd.DataFrame:
 
 def _effective_after_close(content: str) -> pd.Timestamp:
     text = BeautifulSoup(content or "", "html.parser").get_text(" ", strip=True)
-    match = EFFECTIVE_RE.search(text)
+    match = EFFECTIVE_RE.search(re.sub(r"\s+", "", text))
     if not match:
         raise PITSourceError("announcement has no explicit after-close effective date")
     year, month, day = map(int, match.groups())
@@ -271,6 +305,9 @@ def _load_deltas(raw_root: Path, manifest: dict) -> list[RebalanceDelta]:
             if (candidate_removed, candidate_added) != canonical:
                 raise PITSourceError(f"notice {notice_id} HTML/attachment deltas disagree")
         removed, added, chosen_entry = candidates[-1]
+        code_map = _canonical_code_map()
+        removed = [code_map.get(code, code) for code in removed]
+        added = [code_map.get(code, code) for code in added]
         _validate_delta(removed, added, notice_id)
         deltas.append(RebalanceDelta(
             notice_id=notice_id,
@@ -486,6 +523,7 @@ def build(
         "explicit_scope_grid_status": "BUILT" if grid is not None else "NOT_REQUESTED",
         "explicit_scope_grid_rows": len(grid) if grid is not None else 0,
         "historical_membership_status": "reconstructed_from_official_anchor_and_complete_delta_chain",
+        "code_changes_applied": list(CODE_CHANGES),
         "historical_weight_status": "UNAVAILABLE_FAIL_CLOSED",
         "historical_weight_reason": (
             "Public CSI/AKShare endpoints expose only the current/month-end weight snapshot; "

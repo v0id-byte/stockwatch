@@ -11,6 +11,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -19,8 +20,9 @@ from urllib.parse import unquote, urlparse
 import requests
 
 
-EXTRACTOR_VERSION = "csi500_official_capture_v1"
+EXTRACTOR_VERSION = "csi500_official_capture_v2"
 INDEX_CODE = "000905"
+SEARCH_TERMS = ("中证500", "临时调整", "沪深300")
 CSI_HOME = "https://www.csindex.com.cn/csindex-home"
 SEARCH_URL = f"{CSI_HOME}/announcement/queryAnnouncementByVo"
 DETAIL_URL = f"{CSI_HOME}/announcement/queryAnnouncementById"
@@ -171,44 +173,50 @@ def capture(args: argparse.Namespace) -> dict:
             )
         )
 
-    payload = {
-        "searchInput": "中证500",
-        "startDate": args.start,
-        "endDate": args.end,
-        "page": {"desc": "", "key": "", "page": 1, "rows": 100, "sortBy": ""},
-    }
-    search_response = _request(
-        session,
-        "POST",
-        SEARCH_URL,
-        timeout=args.timeout,
-        retries=args.retries,
-        json=payload,
-    )
-    search_obj = search_response.json()
-    if str(search_obj.get("code")) != "200":
-        raise RuntimeError(f"CSI announcement search failed: {search_obj}")
-    if int(search_obj.get("total") or 0) > 100:
-        raise RuntimeError("CSI announcement result exceeded one page; refusing partial capture")
-    search_path = raw_root / "announcement_search.json"
-    search_data = json.dumps(search_obj, ensure_ascii=False, indent=2).encode("utf-8")
-    _write_bytes(search_path, search_data)
-    entries.append(
-        _source_entry(
-            kind="announcement_search",
-            source_url=SEARCH_URL,
-            local_path=search_path,
-            raw_root=raw_root,
-            data=search_data,
-            fetched_at=fetched_at,
+    # A single "中证500" query misses temporary adjustments announced under other
+    # index names (e.g. "关于临时调整中证1000指数样本的公告" moving a stock out of
+    # CSI500); the per-notice content filter below keeps only CSI500-relevant ones.
+    rows_by_id: dict[int, dict] = {}
+    for term_index, term in enumerate(SEARCH_TERMS):
+        payload = {
+            "searchInput": term,
+            "startDate": args.start,
+            "endDate": args.end,
+            "page": {"desc": "", "key": "", "page": 1, "rows": 100, "sortBy": ""},
+        }
+        search_response = _request(
+            session,
+            "POST",
+            SEARCH_URL,
+            timeout=args.timeout,
+            retries=args.retries,
+            json=payload,
         )
-    )
+        search_obj = search_response.json()
+        if str(search_obj.get("code")) != "200":
+            raise RuntimeError(f"CSI announcement search failed for {term}: {search_obj}")
+        if int(search_obj.get("total") or 0) > 100:
+            raise RuntimeError(
+                f"CSI announcement result for {term} exceeded one page; refusing partial capture"
+            )
+        search_path = raw_root / f"announcement_search_{term_index:02d}.json"
+        search_data = json.dumps(search_obj, ensure_ascii=False, indent=2).encode("utf-8")
+        _write_bytes(search_path, search_data)
+        entries.append(
+            _source_entry(
+                kind="announcement_search",
+                source_url=f"{SEARCH_URL}#searchInput={term}",
+                local_path=search_path,
+                raw_root=raw_root,
+                data=search_data,
+                fetched_at=fetched_at,
+            )
+        )
+        for row in search_obj.get("data", []):
+            if row.get("theme") == "指数调样" and row.get("noticeType") == "announcement":
+                rows_by_id[int(row["id"])] = row
 
-    rows = [
-        row
-        for row in search_obj.get("data", [])
-        if row.get("theme") == "指数调样" and row.get("noticeType") == "announcement"
-    ]
+    rows = list(rows_by_id.values())
     for row in sorted(rows, key=lambda item: (item["publishDate"], int(item["id"]))):
         notice_id = int(row["id"])
         detail_path = raw_root / "announcements" / f"{notice_id}.json"
@@ -233,7 +241,7 @@ def capture(args: argparse.Namespace) -> dict:
             _write_bytes(detail_path, detail_data)
 
         content = f"{detail_obj.get('title', '')} {detail_obj.get('content', '')}"
-        if "中证500" not in content.replace(" ", ""):
+        if "中证500" not in re.sub(r"\s+", "", content):
             continue
         published_at = str(detail_obj.get("publishDate") or row["publishDate"])
         available_at = _conservative_available_at(published_at)
