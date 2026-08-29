@@ -296,6 +296,20 @@ class Config:
         return Path(os.path.expanduser(raw))
 
     @property
+    def enable_risk_model(self) -> bool:
+        return _env_bool("ENABLE_RISK_MODEL", False)
+
+    @property
+    def risk_model_path(self) -> Path:
+        raw = os.getenv("RISK_MODEL_PATH", "~/.stockwatch/models/lgbm_v2_risk.txt")
+        return Path(os.path.expanduser(raw))
+
+    @property
+    def model_scoring_universe(self) -> str:
+        """Reference universe for nightly batch scoring; must match training."""
+        return os.getenv("MODEL_SCORING_UNIVERSE", "csi500").strip().lower()
+
+    @property
     def market_regime(self) -> str:
         """auto = 按 CSI300 站上/跌破年线自动判定；bull/bear = 用户手动锁定。"""
         value = os.getenv("MARKET_REGIME", "auto").strip().lower()

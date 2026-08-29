@@ -68,6 +68,28 @@ class Storage:
         # pushed_ok=0 却 status=ok）；"最近一次成功运行" 应按 status='ok' 判定。
         self._add_column(conn, "runs", "status", "status TEXT DEFAULT 'ok'")
         self._add_column(conn, "runs", "error", "error TEXT")
+        # 模型信号复盘列：决策落库时记录当时的模型分数与版本，事后可对齐真实
+        # 收益做 paper-monitor（此前这些值只进 LLM prompt，落库即丢）。
+        self._add_column(conn, "decisions", "tech_score", "tech_score REAL")
+        self._add_column(conn, "decisions", "lgbm_score", "lgbm_score REAL")
+        self._add_column(conn, "decisions", "risk_score", "risk_score REAL")
+        self._add_column(conn, "decisions", "lgbm_context", "lgbm_context TEXT")
+        self._add_column(conn, "decisions", "alpha_model_version", "alpha_model_version TEXT")
+        self._add_column(conn, "decisions", "risk_model_version", "risk_model_version TEXT")
+        conn.executescript("""
+        CREATE TABLE IF NOT EXISTS model_scores (
+            trade_date TEXT NOT NULL,
+            code TEXT NOT NULL,
+            alpha_model_version TEXT,
+            alpha_score REAL,
+            risk_model_version TEXT,
+            risk_score REAL,
+            feature_contract_version TEXT,
+            reference_universe_sha256 TEXT,
+            scored_at TEXT NOT NULL,
+            PRIMARY KEY (trade_date, code)
+        );
+        """)
         conn.executescript("""
         CREATE TABLE IF NOT EXISTS calibration_model (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -411,17 +433,64 @@ class Storage:
             conn.execute("""
                 INSERT INTO decisions
                 (run_id, run_ts, code, name, action, confidence, raw_confidence, calibrated_confidence,
-                 target_price, stop_loss, reasons_json, risks_json, one_liner, pushed, push_error)
+                 target_price, stop_loss, reasons_json, risks_json, one_liner, pushed, push_error,
+                 tech_score, lgbm_score, risk_score, lgbm_context,
+                 alpha_model_version, risk_model_version)
                 VALUES (:run_id, :run_ts, :code, :name, :action, :confidence, :raw_confidence,
                         :calibrated_confidence, :target_price, :stop_loss, :reasons_json, :risks_json,
-                        :one_liner, 0, NULL)
+                        :one_liner, 0, NULL,
+                        :tech_score, :lgbm_score, :risk_score, :lgbm_context,
+                        :alpha_model_version, :risk_model_version)
             """, {
                 "raw_confidence": dec.get("raw_confidence"),
                 "calibrated_confidence": dec.get("calibrated_confidence", dec.get("confidence")),
+                "tech_score": dec.get("tech_score"),
+                "lgbm_score": dec.get("lgbm_score"),
+                "risk_score": dec.get("risk_score"),
+                "lgbm_context": dec.get("lgbm_context"),
+                "alpha_model_version": dec.get("alpha_model_version"),
+                "risk_model_version": dec.get("risk_model_version"),
                 "run_id": run_id,
                 "run_ts": run_ts,
                 **dec,
             })
+
+    def upsert_model_scores(self, rows: list[dict]):
+        """Nightly batch scores over the reference universe (one row per stock)."""
+        with self._conn() as conn:
+            conn.executemany("""
+                INSERT INTO model_scores
+                (trade_date, code, alpha_model_version, alpha_score,
+                 risk_model_version, risk_score, feature_contract_version,
+                 reference_universe_sha256, scored_at)
+                VALUES (:trade_date, :code, :alpha_model_version, :alpha_score,
+                        :risk_model_version, :risk_score, :feature_contract_version,
+                        :reference_universe_sha256, :scored_at)
+                ON CONFLICT(trade_date, code) DO UPDATE SET
+                    alpha_model_version=excluded.alpha_model_version,
+                    alpha_score=excluded.alpha_score,
+                    risk_model_version=excluded.risk_model_version,
+                    risk_score=excluded.risk_score,
+                    feature_contract_version=excluded.feature_contract_version,
+                    reference_universe_sha256=excluded.reference_universe_sha256,
+                    scored_at=excluded.scored_at
+            """, rows)
+
+    def get_latest_model_scores(self, codes: list[str]) -> dict[str, dict]:
+        """Latest scored trade date's rows for the requested codes."""
+        if not codes:
+            return {}
+        with self._conn() as conn:
+            conn.row_factory = sqlite3.Row
+            latest = conn.execute("SELECT MAX(trade_date) FROM model_scores").fetchone()[0]
+            if not latest:
+                return {}
+            marks = ",".join("?" for _ in codes)
+            rows = conn.execute(
+                f"SELECT * FROM model_scores WHERE trade_date=? AND code IN ({marks})",
+                [latest, *codes],
+            ).fetchall()
+        return {row["code"]: dict(row) for row in rows}
 
     def get_decisions_by_run(self, run_id: str) -> list[dict]:
         with self._conn() as conn:
