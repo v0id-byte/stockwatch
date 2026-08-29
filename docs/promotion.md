@@ -107,7 +107,7 @@ A personal A-share watchlist and alert bot for family use. It monitors prices, a
 - OpenAI-compatible / Anthropic / 本地模型 LLM 接口
 - 本地 Web 控制台
 - 飞书/Lark 自建应用机器人
-- 可选 Alpha158 风格因子和 LightGBM 排序模型
+- 可选旧模型自定义技术300因子和 LightGBM 排序模型；标准 Qlib Alpha158 仅用于冻结样本外研究基线
 - systemd 或 Docker Compose 部署
 
 当前能力：
