@@ -233,3 +233,22 @@ OOS 2025-2026:
   0.60 为 ~33 个有标签交易日的功效放宽阈值）+ 一次性执行脚本
   `scripts/evaluate_lockbox_one_shot.py`（默认拒绝，需 `--unlock-lockbox`；先逐项
   校验 sha 再评估；次级指标只报告不判定）。开箱时机由用户决定。
+
+## GRU challenger 结果（2026-08-29 深夜，train-direct GPU，exploratory）
+
+**REJECTED（七道门禁 3/7）**，按预注册 AND 逻辑不晋级，归档为探索性记录：
+
+- 日截面 mean IC **+0.0275**（ICIR 0.149，正日占比 53.6%，347 日）——方向为正但极弱，
+  显著弱于部署门槛；不过值得记录：**优于 LGBM alpha 候选的 −0.069**，说明 60 日原始
+  序列里确有一丝 LGBM 表格因子没抓到的正信息，但远不可交易。
+- decile spread **−0.0005**（负，无单调性）；fold 稳定率 0.571 < 0.60。
+- topk(50,5) 组合年化超额 vs CSI500 **−20.1%**、vs 等权 universe **−15.2%**——
+  IC 微正但组合亏损，典型"头部选不出、只有中段微弱排序"形态。
+- 通过项仅：样本天数、组合 CAGR ≥5%（9.6%，靠 beta）、IC>0。
+- 训练环境：Tesla PG500-216（CUDA），12 折全量 857 只，llama-server 停机窗口内完成，
+  服务已恢复。报告：`~/.stockwatch/history/gru_challenger_report.json`；
+  服务器工作目录 `train-direct:~/stockwatch_train/`（保留备复跑）。
+
+**结论**：深度序列 challenger 与前三轮结论一致——A 股该 universe 上的收益 alpha 仍然
+不存在可部署信号。本轮唯一可部署资产仍是风险模型（G1-G5 全 PASS）。LOCKBOX 开箱
+批次维持只含 lgbm_v2_risk（GRU 未过 retro 门禁，按判据文档 §2 无资格进箱）。
