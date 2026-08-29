@@ -48,7 +48,41 @@ def _as_float(value):
 
 
 def evaluate_model_health(meta: dict) -> dict:
-    """Return production-readiness from the model's true OOS ranking metrics."""
+    """Return production-readiness from the model's true OOS ranking metrics.
+
+    A ``model_kind == "risk"`` model is gated on what it is actually for —
+    predicting forward drawdown (``test_metrics.drawdown_spearman_ic``, where
+    higher score = safer, so the IC must be positive) — never on the alpha
+    return metrics, which for a risk model are incidental.
+    """
+    if str(meta.get("model_kind") or "").strip().lower() == "risk":
+        min_drawdown_ic = _env_float("STOCKWATCH_RISK_MIN_TEST_DRAWDOWN_IC", 0.15)
+        drawdown_ic = _as_float(_metric(meta, "test_metrics", "drawdown_spearman_ic"))
+        failures = []
+        if drawdown_ic is None:
+            status = "UNKNOWN"
+            failures = ["缺少样本外 drawdown IC 指标"]
+        elif drawdown_ic < min_drawdown_ic:
+            failures.append(f"test drawdown IC {drawdown_ic:.4f} < {min_drawdown_ic:.4f}")
+            status = "UNVALIDATED"
+        else:
+            explicit = str(meta.get("validation_status") or "").strip().upper()
+            if explicit in {"FAIL", "FAILED", "UNVALIDATED"}:
+                failures.extend(
+                    str(item) for item in meta.get("validation_failures")
+                    or ["validation_status=UNVALIDATED"]
+                )
+                status = "UNVALIDATED"
+            else:
+                status = "VALIDATED"
+        return {
+            "status": status,
+            "failures": failures,
+            "model_kind": "risk",
+            "drawdown_spearman_ic": drawdown_ic,
+            "thresholds": {"min_test_drawdown_ic": min_drawdown_ic},
+        }
+
     min_return_ic = _env_float("STOCKWATCH_LGBM_MIN_TEST_RETURN_IC", 0.0)
     min_decile_spread = _env_float("STOCKWATCH_LGBM_MIN_TEST_DECILE_SPREAD", 0.0)
     return_ic = _as_float(_metric(meta, "test_metrics", "return_spearman_ic"))
