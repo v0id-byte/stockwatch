@@ -252,3 +252,41 @@ OOS 2025-2026:
 **结论**：深度序列 challenger 与前三轮结论一致——A 股该 universe 上的收益 alpha 仍然
 不存在可部署信号。本轮唯一可部署资产仍是风险模型（G1-G5 全 PASS）。LOCKBOX 开箱
 批次维持只含 lgbm_v2_risk（GRU 未过 retro 门禁，按判据文档 §2 无资格进箱）。
+
+## 收益 alpha 探索批次二（2026-08-30 凌晨，exploratory，GPU/CPU 并行）
+
+用户授权 GPU 空闲随便试。三个预注册探索实验，全部沿用同折同门禁同成本，
+结果如实记录（retro 窗口已被反复观察，任何 PASS 都只算弱证据；实际全部 REJECTED）：
+
+| 候选 | retro mean IC | ICIR | decile spread | 年化超额 vs CSI500 | 七道门禁 |
+|---|---|---|---|---|---|
+| LGBM 全 181 特征（基线） | −0.069 | — | 负 | 负 | REJECTED |
+| LGBM 筛选 top-40（`evaluate_screened_candidate.py`） | **+0.028** | 0.147 | −0.001 | −25.1% | REJECTED (2/7) |
+| GRU MSE（前批） | +0.028 | 0.149 | −0.0005 | −20.1% | REJECTED (3/7) |
+| GRU IC-loss（`--loss ic`，逐日截面相关损失） | **+0.033** | 0.140 | −0.0011 | −24.3% | REJECTED (3/7) |
+
+因子筛选口径：仅用第一折训练窗（<2023-02-06，158 日，先于一切验证/测试）的
+日 IC 稳定性 |mean|/std 选 top-40——把 IC 从负翻正，但入选者几乎全是量能/换手/
+beta 类（AMTMA250/VMA250/TURN250/BETA30…），又收敛到风险味特征。
+
+周期诊断（`diagnose_alpha_horizon.py`，可执行 open→open 标签，只看 IC 不做组合）：
+
+| 周期 | full-OOS mean IC (705日) | retro mean IC (347日) |
+|---|---|---|
+| 5d | 0.036 | 0.026 |
+| 10d | 0.035 | 0.010 |
+| 20d（基线） | — | −0.069 ~ +0.033 |
+
+**三重收敛结论**：三个独立模型族在 20d 周期上撞到同一堵墙——约 +0.03 的中段弱排序、
+头部反向选择、组合层面必亏。信号随周期衰减（5d→20d）也随时间衰减（2025 起明显
+弱于 2023-24，与 A 股量化拥挤化的公开叙事一致）。价量信息在该 universe、该周期、
+该成本假设下的 alpha 天花板 ≈ 0.03 IC，不可交易。继续在 retro 窗口上试价量变体
+只会累积多重检验债务，暂停此方向。
+
+**与公开基准对照**（方向性参考，非严格可比）：Qlib Alpha158 系列公开基准的 LGBM/NN
+rank IC 多在 ~2 日标签上报 0.03-0.06 量级，且靠高换手兑现——我们 20d 持有 +
+零售成本假设本来就处于最难象限。业界额外弹药我们尚未使用的：日内/微观结构数据、
+PIT 基本面（二期已规划）、分析师预期修正、资金流。消息面 = 正在跑的 MiniMax
+三臂 ablation（本批次唯一还没揭盲的新信息族）。
+
+报告：`screened_candidate_report.json` / `gru_ic_report.json` / `alpha_horizon_diagnostic.json`。

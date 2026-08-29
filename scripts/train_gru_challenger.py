@@ -78,6 +78,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--patience", type=int, default=3)
     parser.add_argument("--batch-size", type=int, default=4096)
     parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--loss", choices=("mse", "ic"), default="mse",
+                        help="ic = per-day cross-sectional correlation loss")
     parser.add_argument("--max-codes", type=int, default=0, help="CPU smoke only")
     return parser.parse_args()
 
@@ -121,8 +123,7 @@ def _build_sequences(args, panel_keys: pd.DataFrame) -> tuple[np.ndarray, pd.Dat
     return np.nan_to_num(tensor, nan=0.0, posinf=0.0, neginf=0.0), keys
 
 
-def _train_fold(X, y, train_pos, val_pos, args, device):
-    """train_pos/val_pos index rows of X (sequence order); y is aligned to X."""
+def _make_model(args, device):
     import torch
     from torch import nn
 
@@ -138,7 +139,58 @@ def _train_fold(X, y, train_pos, val_pos, args, device):
             output, _ = self.gru(batch)
             return self.head(output[:, -1]).squeeze(-1)
 
-    model = GRUHead().to(device)
+    return GRUHead().to(device)
+
+
+def _train_fold_ic(X, y, train_days, val_days, args, device):
+    """Day-batched training on 1 - Pearson(pred, label) per cross-section."""
+    import torch
+
+    model = _make_model(args, device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    X_t = torch.from_numpy(X)
+    y_t = torch.from_numpy(y)
+
+    def day_loss(positions):
+        idx = torch.as_tensor(positions)
+        pred = model(X_t[idx].to(device))
+        target = y_t[idx].to(device)
+        pred = pred - pred.mean()
+        target = target - target.mean()
+        denom = pred.norm() * target.norm() + 1e-8
+        return 1.0 - (pred * target).sum() / denom
+
+    rng = np.random.default_rng(SEED)
+    best_val, best_state, bad = float("inf"), None, 0
+    for epoch in range(args.epochs):
+        model.train()
+        for day_index in rng.permutation(len(train_days)):
+            optimizer.zero_grad()
+            loss = day_loss(train_days[day_index])
+            loss.backward()
+            optimizer.step()
+        model.eval()
+        with torch.no_grad():
+            val_loss = float(np.mean([day_loss(d).item() for d in val_days]))
+        if val_loss < best_val - 1e-6:
+            best_val, bad = val_loss, 0
+            best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
+        else:
+            bad += 1
+            if bad >= args.patience:
+                break
+    if best_state:
+        model.load_state_dict(best_state)
+    model.eval()
+    return model
+
+
+def _train_fold(X, y, train_pos, val_pos, args, device):
+    """train_pos/val_pos index rows of X (sequence order); y is aligned to X."""
+    import torch
+    from torch import nn
+
+    model = _make_model(args, device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     loss_fn = nn.MSELoss()
     X_t = torch.from_numpy(X)
@@ -236,12 +288,22 @@ def main() -> None:
         train_mask = trainable & (dates < fold["train_end_exclusive"]).to_numpy()
         val_mask = trainable & ((dates >= fold["validation_start"]) & (dates < fold["validation_end_exclusive"])).to_numpy()
         test_mask = ((dates >= fold["test_start"]) & (dates < fold["test_end_exclusive"])).to_numpy()
-        model = _train_fold(
-            X, y_seq,
-            panel.loc[train_mask, "seq_pos"].to_numpy(dtype=int),
-            panel.loc[val_mask, "seq_pos"].to_numpy(dtype=int),
-            args, device,
-        )
+        if args.loss == "ic":
+            def day_groups(mask):
+                rows = panel.loc[mask, ["signal_date", "seq_pos"]]
+                return [
+                    g["seq_pos"].to_numpy(dtype=int)
+                    for _, g in rows.groupby("signal_date", sort=False)
+                    if len(g) >= 30
+                ]
+            model = _train_fold_ic(X, y_seq, day_groups(train_mask), day_groups(val_mask), args, device)
+        else:
+            model = _train_fold(
+                X, y_seq,
+                panel.loc[train_mask, "seq_pos"].to_numpy(dtype=int),
+                panel.loc[val_mask, "seq_pos"].to_numpy(dtype=int),
+                args, device,
+            )
         out = panel[test_mask].copy()
         out["score"] = np.nan
         scoreable = test_mask & has_seq  # score members with sequences, labeled or not
@@ -272,7 +334,7 @@ def main() -> None:
         "exploratory": True,
         "device": device,
         "architecture": {"channels": list(CHANNELS), "timesteps": LONG_LAGS,
-                         "hidden": args.hidden, "layers": args.layers},
+                         "hidden": args.hidden, "layers": args.layers, "loss": args.loss},
         "promotion_rule": "seven gates AND retro IC >= lgbm+0.01 AND secondaries within bands AND ops budget",
         "result": summary,
     }
