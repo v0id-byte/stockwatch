@@ -6,3 +6,4 @@ db.sqlite
 .env
 models/
 reports/
+.codegraph/
