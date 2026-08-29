@@ -332,39 +332,43 @@ def once():
             alpha_contexts = summarize_custom_technical_300_cross_section(factor_map)
         except Exception as e:
             logger.warning(f"自定义技术300摘要生成失败: {e}")
-    if cfg.enable_lgbm and factor_map:
+    model_score_rows: dict[str, dict] = {}
+    if cfg.enable_lgbm or cfg.enable_risk_model:
+        # Production scoring contract: scores are computed nightly over the FULL
+        # CSI500 reference universe (core/model_scoring.py) with the training
+        # cross-section's rank normalization; the runner only LOOKS THEM UP.
+        # Computing model features inline over a small watchlist batch would
+        # silently change the rank-normalization universe.
         try:
-            from analysis.lgbm import LgbmRanker, format_lgbm_context
-            from analysis.factors import WINDOWS
-            from analysis.regime import current_trend_regime
-            regime = cfg.market_regime
-            if regime == "auto":
-                regime = current_trend_regime(market)
-            model_path = cfg.resolve_lgbm_model_path(regime)
-            logger.info(f"LGBM 市场状态={regime}, 模型={model_path.name}")
-            ranker = LgbmRanker(model_path)
-            # Long-window factors need full history; stocks with too few klines would
-            # feed fillna(0) features the model never saw in training, so skip them.
-            min_hist = max(WINDOWS)
-            kline_len = {d["code"]: len(d.get("kline", [])) for d in decisions}
-            eligible = {c: f for c, f in factor_map.items() if kline_len.get(c, 0) >= min_hist}
-            # the bear model also uses an earnings-quality fundamental; inject the
-            # latest point-in-time value so online features match training
-            if "ocf_to_eps" in ranker.meta.get("features", []) and eligible:
-                try:
-                    from analysis.fundamental import get_latest_ocf_to_eps
-                    ocf = get_latest_ocf_to_eps(list(eligible))
-                    for code, factors in eligible.items():
-                        if code in ocf:
-                            factors["ocf_to_eps"] = ocf[code]
-                except Exception as e:
-                    logger.debug(f"基本面 ocf_to_eps 注入跳过: {e}")
-            scores = ranker.predict_batch(eligible)
-            for code in factor_map:
-                scores.setdefault(code, None)
-            lgbm_contexts = format_lgbm_context(scores, unavailable_text=ranker.unavailable_context())
+            from analysis.lgbm import format_lgbm_context, format_risk_context
+            pool = storage.get_latest_model_scores()
+            watch_codes = [d["code"] for d in decisions]
+            model_score_rows = {c: pool[c] for c in watch_codes if c in pool}
+            stale_note = ""
+            if pool:
+                scored_date = next(iter(pool.values())).get("trade_date", "")
+                stale_note = f"（{scored_date} 收盘后全池批打分）"
+            if cfg.enable_lgbm:
+                alpha_pool = {c: r.get("alpha_score") for c, r in pool.items()}
+                alpha_ctx = format_lgbm_context(
+                    alpha_pool,
+                    unavailable_text="LightGBM 排序模型预测: 分数未就绪（夜间批打分未运行或模型未通过验证）",
+                )
+                lgbm_contexts = {
+                    c: (alpha_ctx.get(c, "") + stale_note if c in alpha_ctx and c in pool else
+                        "LightGBM 排序模型预测: 该股不在打分股票池（CSI500）内，跳过")
+                    for c in watch_codes
+                }
+            if cfg.enable_risk_model:
+                risk_pool = {c: r.get("risk_score") for c, r in pool.items()}
+                risk_ctx = format_risk_context(risk_pool)
+                for code in watch_codes:
+                    line = (risk_ctx.get(code, "") + stale_note if code in pool else
+                            "回撤风险模型: 该股不在打分股票池（CSI500）内，跳过")
+                    current = lgbm_contexts.get(code, "")
+                    lgbm_contexts[code] = "\n".join(p for p in [current, line] if p)
         except Exception as e:
-            logger.warning(f"LightGBM 推理失败，跳过: {e}")
+            logger.warning(f"模型分数查表失败，跳过: {e}")
     if propagation_contexts:
         for d in decisions:
             code = d["code"]
@@ -441,6 +445,11 @@ def once():
                     f"决策提醒被 ALERT_LEVELS 过滤 {decision['code']} "
                     f"level={level}({ALERT_LEVEL_LABELS.get(level, level)})"
                 )
+        score_row = model_score_rows.get(d["code"], {})
+        decision["lgbm_score"] = score_row.get("alpha_score")
+        decision["risk_score"] = score_row.get("risk_score")
+        decision["alpha_model_version"] = score_row.get("alpha_model_version")
+        decision["risk_model_version"] = score_row.get("risk_model_version")
         final_decisions.append(decision)
         storage.insert_decision(run_id, datetime.now().isoformat(), decision)
         llm_calls += 1

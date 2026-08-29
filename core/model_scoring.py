@@ -27,7 +27,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from utils.logger import logger  # noqa: E402
+from loguru import logger  # noqa: E402
 
 HISTORY_DAYS = 560  # 250-day windows + warmup + holidays margin
 

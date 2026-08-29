@@ -202,27 +202,40 @@ class BotService:
         return decision, quote
 
     def _factor_contexts(self, code: str, kline: list[dict]) -> tuple[str, str]:
-        if not (self.cfg.enable_alpha158 or self.cfg.enable_lgbm):
+        if not (self.cfg.enable_alpha158 or self.cfg.enable_lgbm or self.cfg.enable_risk_model):
             return "", ""
         try:
-            import pandas as pd
-            from analysis.factors import compute_custom_technical_300
-
-            market_df = pd.DataFrame(self.market.get_index_kline("sh000001", limit=320))
-            factors = compute_custom_technical_300(pd.DataFrame(kline), market_df)
             alpha_summary = ""
-            lgbm_context = ""
             if self.cfg.enable_alpha158:
-                from analysis.factors import summarize_custom_technical_300_cross_section
+                import pandas as pd
+                from analysis.factors import (
+                    compute_custom_technical_300,
+                    summarize_custom_technical_300_cross_section,
+                )
+
+                market_df = pd.DataFrame(self.market.get_index_kline("sh000001", limit=320))
+                factors = compute_custom_technical_300(pd.DataFrame(kline), market_df)
                 alpha_summary = summarize_custom_technical_300_cross_section({code: factors}).get(code, "")
-            if self.cfg.enable_lgbm:
-                from analysis.lgbm import LgbmRanker, format_lgbm_context
-                ranker = LgbmRanker(self.cfg.lgbm_model_path)
-                lgbm_context = format_lgbm_context(
-                    {code: ranker.predict(factors)},
-                    unavailable_text=ranker.unavailable_context(),
-                ).get(code, "")
-            return alpha_summary, lgbm_context
+
+            # Model scores come from the nightly full-pool batch — a single-stock
+            # inline prediction would collapse the cross-sectional rank inputs to
+            # zero (the old degenerate path); a lookup keeps pool percentiles.
+            lines = []
+            if self.cfg.enable_lgbm or self.cfg.enable_risk_model:
+                from analysis.lgbm import format_lgbm_context, format_risk_context
+                pool = self.storage.get_latest_model_scores()
+                if self.cfg.enable_lgbm:
+                    ctx = format_lgbm_context(
+                        {c: r.get("alpha_score") for c, r in pool.items()},
+                        unavailable_text="LightGBM 排序模型预测: 分数未就绪，跳过",
+                    ).get(code)
+                    lines.append(ctx or "LightGBM 排序模型预测: 该股不在打分股票池（CSI500）内，跳过")
+                if self.cfg.enable_risk_model:
+                    ctx = format_risk_context(
+                        {c: r.get("risk_score") for c, r in pool.items()}
+                    ).get(code)
+                    lines.append(ctx or "回撤风险模型: 该股不在打分股票池（CSI500）内，跳过")
+            return alpha_summary, "\n".join(lines)
         except Exception as e:
             logger.warning(f"即时查询因子上下文失败 {code}: {e}")
             return "", ""

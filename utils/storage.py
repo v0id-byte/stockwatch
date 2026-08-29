@@ -476,20 +476,29 @@ class Storage:
                     scored_at=excluded.scored_at
             """, rows)
 
-    def get_latest_model_scores(self, codes: list[str]) -> dict[str, dict]:
-        """Latest scored trade date's rows for the requested codes."""
-        if not codes:
-            return {}
+    def get_latest_model_scores(self, codes: list[str] | None = None) -> dict[str, dict]:
+        """Latest scored trade date's rows; None = the whole reference pool.
+
+        Percentile displays must rank within the FULL pool (the training
+        reference universe), so callers formatting contexts fetch everything
+        and then pick out their watchlist codes.
+        """
         with self._conn() as conn:
             conn.row_factory = sqlite3.Row
             latest = conn.execute("SELECT MAX(trade_date) FROM model_scores").fetchone()[0]
             if not latest:
                 return {}
-            marks = ",".join("?" for _ in codes)
-            rows = conn.execute(
-                f"SELECT * FROM model_scores WHERE trade_date=? AND code IN ({marks})",
-                [latest, *codes],
-            ).fetchall()
+            if codes is None:
+                rows = conn.execute(
+                    "SELECT * FROM model_scores WHERE trade_date=?", [latest]).fetchall()
+            else:
+                if not codes:
+                    return {}
+                marks = ",".join("?" for _ in codes)
+                rows = conn.execute(
+                    f"SELECT * FROM model_scores WHERE trade_date=? AND code IN ({marks})",
+                    [latest, *codes],
+                ).fetchall()
         return {row["code"]: dict(row) for row in rows}
 
     def get_decisions_by_run(self, run_id: str) -> list[dict]:

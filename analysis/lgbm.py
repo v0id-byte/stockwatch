@@ -187,6 +187,37 @@ class LgbmRanker:
         return self.predict_batch({"_": factors_dict}).get("_")
 
 
+def format_risk_context(scores_by_code: dict[str, float | None],
+                        unavailable_text: str = "回撤风险模型: 分数未就绪，跳过") -> dict[str, str]:
+    """Pool-percentile safety context; higher score = safer (risk model contract).
+
+    Rank within the passed pool — callers must pass the FULL reference
+    universe's scores, then pick their watchlist entries, so the percentile
+    keeps the training cross-section's meaning.
+    """
+    valid = {code: score for code, score in scores_by_code.items() if score is not None}
+    contexts = {code: unavailable_text for code in scores_by_code}
+    if len(valid) <= 1:
+        for code, score in valid.items():
+            contexts[code] = f"回撤风险模型: 原始安全分 {score:.4f}（单票无法横向排名）"
+        return contexts
+    ordered = sorted(valid.items(), key=lambda item: item[1])
+    denom = max(1, len(ordered) - 1)
+    for rank, (code, _score) in enumerate(ordered):
+        percentile = rank / denom  # 0 = riskiest, 1 = safest
+        display = percentile * 9
+        if percentile <= 0.10:
+            contexts[code] = (
+                f"回撤风险模型: 安全分 {display:.1f}/9"
+                f"（处于全池风险最高的 10%，历史上该分位 20 日内出现深回撤的概率显著偏高）"
+            )
+        elif percentile <= 0.30:
+            contexts[code] = f"回撤风险模型: 安全分 {display:.1f}/9（风险偏高分位，注意回撤）"
+        else:
+            contexts[code] = f"回撤风险模型: 安全分 {display:.1f}/9"
+    return contexts
+
+
 def format_lgbm_context(scores_by_code: dict[str, float | None],
                         unavailable_text: str = "LightGBM 排序模型预测: 未加载，跳过") -> dict[str, str]:
     valid = {code: score for code, score in scores_by_code.items() if score is not None}
