@@ -26,6 +26,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--max-codes", type=int, default=0, help="0 means all training-set codes.")
     parser.add_argument("--sleep", type=float, default=0.2, help="Polite delay between share-structure fetches.")
     parser.add_argument("--refresh", action="store_true", help="Refetch cached raw share-structure files.")
+    parser.add_argument("--min-pit-coverage", type=float, default=0.95,
+                        help="Fail the exposure gate below this date/code market-cap coverage.")
     parser.add_argument("--skip-market-cap", action="store_true")
     parser.add_argument("--sector-mode", choices=["auto", "historical", "current", "none"], default="auto")
     parser.add_argument("--output-market-cap", default="", help="Defaults to <root>/market_cap_daily.parquet.")
@@ -91,67 +93,23 @@ def _load_or_fetch_shares(cache_dir: Path, code: str, refresh: bool) -> tuple[pd
     return shares, "fetch"
 
 
-def _load_or_fetch_turnover_cap(cache_dir: Path, code: str, start: pd.Timestamp,
-                                end: pd.Timestamp, refresh: bool) -> pd.DataFrame:
-    path = cache_dir / f"{code}.parquet"
-    if path.exists() and not refresh:
-        return pd.read_parquet(path)
-    import akshare as ak
-
-    raw = ak.stock_zh_a_hist(
-        symbol=code,
-        period="daily",
-        start_date=start.strftime("%Y%m%d"),
-        end_date=end.strftime("%Y%m%d"),
-        adjust="",
-    )
-    required = {"日期", "收盘", "成交量", "换手率"}
-    if raw.empty or not required.issubset(raw.columns):
-        return pd.DataFrame()
-    out = raw[["日期", "收盘", "成交量", "换手率"]].copy()
-    out.columns = ["trade_date", "close", "volume_lots", "turnover_pct"]
-    out["trade_date"] = pd.to_datetime(out["trade_date"], errors="coerce").astype("datetime64[ns]")
-    out["close"] = pd.to_numeric(out["close"], errors="coerce")
-    out["volume_lots"] = pd.to_numeric(out["volume_lots"], errors="coerce")
-    out["turnover_pct"] = pd.to_numeric(out["turnover_pct"], errors="coerce")
-    out = out.dropna(subset=["trade_date", "close", "volume_lots", "turnover_pct"])
-    out = out[out["turnover_pct"] > 0]
-    if out.empty:
-        return pd.DataFrame()
-    out["float_a_share"] = out["volume_lots"] * 10000.0 / out["turnover_pct"]
-    out["float_market_cap"] = out["close"] * out["float_a_share"]
-    out["market_cap"] = out["float_market_cap"]
-    out["total_share"] = np.nan
-    out["share_date"] = out["trade_date"]
-    out["code"] = code
-    out["market_cap_source"] = "turnover_implied_float"
-    out = out[[
-        "trade_date", "code", "market_cap", "float_market_cap",
-        "total_share", "float_a_share", "share_date", "market_cap_source",
-    ]]
-    if not out.empty:
-        out.to_parquet(path, index=False)
-    return out
-
-
 def _market_cap_for_code(root: Path, cache_dir: Path, code: str, start: pd.Timestamp,
                          end: pd.Timestamp, refresh: bool) -> tuple[pd.DataFrame | None, str]:
     stock_path = root / "stocks" / f"{code}.parquet"
     if not stock_path.exists():
         return None, "missing stock history"
-    turnover_cache = cache_dir.parent / "turnover_market_cap"
-    turnover_cache.mkdir(parents=True, exist_ok=True)
     try:
         shares, source = _load_or_fetch_shares(cache_dir, code, refresh)
-    except Exception:
-        shares = pd.DataFrame()
-        source = "missing"
+    except Exception as exc:
+        return None, f"share history error: {type(exc).__name__}"
     if shares.empty:
-        fallback = _load_or_fetch_turnover_cap(turnover_cache, code, start, end, refresh)
-        if fallback.empty:
-            return None, "missing share and turnover history"
-        return fallback, "ok_turnover"
-    prices = pd.read_parquet(stock_path, columns=["trade_date", "close"])
+        return None, "missing total-share history"
+    shares = shares.copy()
+    shares["share_date"] = pd.to_datetime(
+        shares["share_date"], errors="coerce",
+    ).astype("datetime64[ns]")
+    prices = pd.read_parquet(stock_path, columns=["trade_date", "raw_close"])
+    prices = prices.rename(columns={"raw_close": "close"})
     prices["trade_date"] = pd.to_datetime(prices["trade_date"]).astype("datetime64[ns]")
     prices["close"] = pd.to_numeric(prices["close"], errors="coerce")
     prices = prices[(prices["trade_date"] >= start) & (prices["trade_date"] <= end)]
@@ -168,19 +126,11 @@ def _market_cap_for_code(root: Path, cache_dir: Path, code: str, start: pd.Times
     )
     merged = merged.dropna(subset=["total_share"])
     if merged.empty:
-        fallback = _load_or_fetch_turnover_cap(turnover_cache, code, start, end, refresh)
-        if fallback.empty:
-            return None, "no as-of share or turnover coverage"
-        return fallback, "ok_turnover"
+        return None, "no as-of total-share coverage"
     merged["code"] = code
     merged["market_cap"] = merged["close"] * merged["total_share"]
     merged["float_market_cap"] = merged["close"] * merged["float_a_share"]
-    merged["market_cap_source"] = source
-    coverage = len(merged) / max(1, len(prices))
-    if coverage < 0.5:
-        fallback = _load_or_fetch_turnover_cap(turnover_cache, code, start, end, refresh)
-        if not fallback.empty:
-            return fallback, "ok_turnover"
+    merged["market_cap_source"] = f"{source}:raw_close_x_total_share"
     return merged[[
         "trade_date", "code", "market_cap", "float_market_cap",
         "total_share", "float_a_share", "share_date", "market_cap_source",
@@ -188,7 +138,7 @@ def _market_cap_for_code(root: Path, cache_dir: Path, code: str, start: pd.Times
 
 
 def _build_market_cap(root: Path, training_set: Path, output: Path, max_codes: int,
-                      sleep_seconds: float, refresh: bool) -> dict:
+                      sleep_seconds: float, refresh: bool, min_coverage: float) -> dict:
     codes, start, end = _load_training_scope(training_set, max_codes)
     cache_dir = root / "neutralization_exposures" / "share_history"
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -217,6 +167,15 @@ def _build_market_cap(root: Path, training_set: Path, output: Path, max_codes: i
     data = pd.concat(frames, ignore_index=True)
     output.parent.mkdir(parents=True, exist_ok=True)
     data.to_parquet(output, index=False)
+    scope = pd.read_parquet(training_set, columns=["trade_date", "code"])
+    scope["trade_date"] = pd.to_datetime(scope["trade_date"]).astype("datetime64[ns]")
+    scope["code"] = scope["code"].astype(str).str.zfill(6)
+    scope = scope[scope["code"].isin(codes)].drop_duplicates(["trade_date", "code"])
+    covered = scope.merge(
+        data[["trade_date", "code", "market_cap"]].drop_duplicates(["trade_date", "code"]),
+        on=["trade_date", "code"], how="left", validate="one_to_one",
+    )["market_cap"].notna()
+    coverage = float(covered.mean()) if len(covered) else 0.0
     return {
         "output": str(output),
         "rows": int(len(data)),
@@ -226,7 +185,13 @@ def _build_market_cap(root: Path, training_set: Path, output: Path, max_codes: i
         "skipped_count": len(skipped),
         "skipped": skipped[:50],
         "status_counts": dict(statuses),
-        "note": "market_cap is total market cap when share-structure data is available; otherwise it is turnover-implied float market cap used as a size exposure.",
+        "kind": "point_in_time",
+        "price_basis": "unadjusted raw close in CNY/share",
+        "share_basis": "total_share effective as of trade_date",
+        "coverage": coverage,
+        "minimum_coverage": min_coverage,
+        "gate": "PASS" if coverage >= min_coverage else "FAIL",
+        "note": "market_cap is always raw close * total shares; float market cap is never relabeled as total market cap.",
     }
 
 
@@ -293,7 +258,27 @@ def _fetch_sw_current() -> pd.DataFrame:
     return pd.DataFrame(rows).drop_duplicates("code", keep="last")
 
 
-def _build_sector(output: Path, mode: str) -> dict:
+def _sector_coverage(training_set: Path, sectors: pd.DataFrame, kind: str) -> float:
+    scope = pd.read_parquet(training_set, columns=["trade_date", "code"])
+    scope["trade_date"] = pd.to_datetime(scope["trade_date"]).astype("datetime64[ns]")
+    scope["code"] = scope["code"].astype(str).str.zfill(6)
+    scope = scope.drop_duplicates(["trade_date", "code"])
+    if kind == "point_in_time":
+        right = sectors[["code", "start_date", "sector"]].copy()
+        right["start_date"] = pd.to_datetime(right["start_date"]).astype("datetime64[ns]")
+        right = right.sort_values(["start_date", "code"])
+        merged = pd.merge_asof(
+            scope.sort_values(["trade_date", "code"]), right,
+            left_on="trade_date", right_on="start_date", by="code",
+            direction="backward", allow_exact_matches=True,
+        )
+        return float(merged["sector"].notna().mean()) if len(merged) else 0.0
+    mapped = scope["code"].isin(set(sectors["code"].astype(str).str.zfill(6)))
+    return float(mapped.mean()) if len(mapped) else 0.0
+
+
+def _build_sector(output: Path, mode: str, training_set: Path | None = None,
+                  min_coverage: float = 0.95) -> dict:
     if mode == "none":
         return {"enabled": False, "reason": "sector-mode=none"}
     source = ""
@@ -307,10 +292,9 @@ def _build_sector(output: Path, mode: str) -> dict:
             kind = "point_in_time"
         else:
             raise RuntimeError("historical mode skipped")
-    except Exception as exc:
-        if mode == "historical":
+    except Exception:
+        if mode in {"auto", "historical"}:
             raise
-        print(f"historical Shenwan unavailable, falling back to current components: {exc}", flush=True)
         data = _fetch_sw_current()
         source = "akshare:sw_index_first_info/index_component_sw"
         kind = "static_current"
@@ -318,10 +302,15 @@ def _build_sector(output: Path, mode: str) -> dict:
         raise RuntimeError("no sector exposures were built")
     output.parent.mkdir(parents=True, exist_ok=True)
     data.to_parquet(output, index=False)
+    coverage = _sector_coverage(training_set, data, kind) if training_set else None
+    gate_pass = kind == "point_in_time" and (coverage is None or coverage >= min_coverage)
     return {
         "output": str(output),
         "source": source,
         "kind": kind,
+        "coverage": coverage,
+        "minimum_coverage": min_coverage,
+        "gate": "PASS" if gate_pass else "FAIL",
         "rows": int(len(data)),
         "codes": int(data["code"].nunique()),
         "note": "Current-component sectors are not historical PIT classifications." if kind != "point_in_time" else "",
@@ -337,14 +326,23 @@ def main() -> None:
         output = Path(args.output_market_cap).expanduser() if args.output_market_cap else root / "market_cap_daily.parquet"
         report["market_cap"] = _build_market_cap(
             root, training_set, output, args.max_codes, args.sleep, args.refresh,
+            args.min_pit_coverage,
         )
     if args.sector_mode != "none":
         output = Path(args.output_sector).expanduser() if args.output_sector else root / "sector_map_sw.parquet"
-        report["sector"] = _build_sector(output, args.sector_mode)
+        report["sector"] = _build_sector(
+            output, args.sector_mode, training_set, args.min_pit_coverage,
+        )
     report_path = root / "neutralization_exposures_report.json"
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2))
     print(json.dumps(report, ensure_ascii=False, indent=2))
     print(f"exposure report saved: {report_path}")
+    failed_gates = [
+        name for name in ("market_cap", "sector")
+        if name in report and report[name].get("gate") == "FAIL"
+    ]
+    if failed_gates:
+        raise RuntimeError(f"PIT exposure coverage gate failed: {', '.join(failed_gates)}")
 
 
 if __name__ == "__main__":
