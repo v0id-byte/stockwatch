@@ -266,3 +266,89 @@ def test_historical_investable_member_cannot_be_omitted_from_stock_scope():
     })
     with pytest.raises(DataContractError, match="missing stock parquet"):
         builder._validate_investable_stock_scope(flags, {"000001"})
+
+
+def test_executable_20d_labels_and_date_columns(monkeypatch):
+    dates = pd.bdate_range("2024-01-02", periods=260)
+    stock = pd.DataFrame({
+        "trade_date": dates,
+        "raw_close": np.arange(100.5, 360.5),
+        "adj_open": np.arange(100.0, 360.0),
+        "adj_high": np.arange(101.0, 361.0),
+        "adj_low": np.arange(99.0, 359.0),
+        "adj_close": np.arange(100.5, 360.5),
+        "adj_vwap": np.arange(100.25, 360.25),
+        "adj_factor": 1.0,
+        "volume_shares": 1_000_000.0,
+        "turnover": np.arange(1.0, 261.0) / 10_000,
+        "amihud_1d": np.arange(1.0, 261.0) / 1e10,
+        "float_market_cap": 1e10,
+    })
+    benchmark = pd.DataFrame({
+        "trade_date": dates,
+        "benchmark_return": 0.001,
+        "benchmark_close_return": np.linspace(0.0001, 0.002, len(dates)),
+    })
+
+    def fake_alpha(frame):
+        out = pd.DataFrame(0.0, index=frame.index, columns=QLIB_ALPHA158_FEATURES)
+        out.insert(0, "trade_date", frame["trade_date"].to_numpy())
+        return out
+
+    monkeypatch.setattr(builder, "compute_qlib_alpha158_frame", fake_alpha)
+    result = builder.derive_stock_market_fields(stock, benchmark, "000001")
+    first = result.iloc[0]
+    # entry at t+1 open, exit at t+21 open
+    assert first["entry_date"] == dates[1]
+    assert first["label_end_date_20d"] == dates[21]
+    assert first["next_open_return_20d"] == pytest.approx(
+        stock.loc[21, "adj_open"] / stock.loc[1, "adj_open"] - 1
+    )
+    # monotonically rising closes: worst close during holding is close[t+1]
+    assert first["forward_drawdown_20d"] == pytest.approx(
+        stock.loc[1, "adj_close"] / stock.loc[1, "adj_open"] - 1
+    )
+    assert first["forward_drawdown_20d_low"] == pytest.approx(
+        stock.loc[1, "adj_low"] / stock.loc[1, "adj_open"] - 1
+    )
+    # tail rows cannot carry a full 20d label
+    tail = result.iloc[-1]
+    assert pd.isna(tail["next_open_return_20d"]) or tail["label_end_date_20d"] is not pd.NaT
+
+
+def test_drawdown_20d_catches_a_crash_inside_holding(monkeypatch):
+    dates = pd.bdate_range("2024-01-02", periods=280)
+    close = np.full(len(dates), 100.0)
+    close[10] = 60.0  # crash on day 10 (inside first row's holding window)
+    stock = pd.DataFrame({
+        "trade_date": dates,
+        "raw_close": close,
+        "adj_open": np.full(len(dates), 100.0),
+        "adj_high": np.full(len(dates), 101.0),
+        "adj_low": np.full(len(dates), 99.0),
+        "adj_close": close,
+        "adj_vwap": np.full(len(dates), 100.0),
+        "adj_factor": 1.0,
+        "volume_shares": 1_000_000.0,
+        "turnover": 0.01,
+        "amihud_1d": 1e-10,
+        "float_market_cap": 1e10,
+    })
+    benchmark = pd.DataFrame({
+        "trade_date": dates,
+        "benchmark_return": 0.0,
+        "benchmark_close_return": 0.0,
+    })
+
+    def fake_alpha(frame):
+        out = pd.DataFrame(0.0, index=frame.index, columns=QLIB_ALPHA158_FEATURES)
+        out.insert(0, "trade_date", frame["trade_date"].to_numpy())
+        return out
+
+    monkeypatch.setattr(builder, "compute_qlib_alpha158_frame", fake_alpha)
+    result = builder.derive_stock_market_fields(stock, benchmark, "000001")
+    first = result.iloc[0]
+    assert first["forward_drawdown_20d"] == pytest.approx(60.0 / 100.0 - 1)
+    # a row whose holding window starts after the crash never sees it
+    later = result[result["signal_date"] == dates[30]].iloc[0]
+    assert later["forward_drawdown_20d"] == pytest.approx(-0.0, abs=1e-9)

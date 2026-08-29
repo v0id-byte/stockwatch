@@ -215,8 +215,15 @@ def _asof_event(
     ).sort_values(["signal_date", "code"])
 
 
-def derive_stock_market_fields(stock: pd.DataFrame, benchmark: pd.DataFrame, code: str) -> pd.DataFrame:
-    """Derive exact Alpha158 inputs, next-open label, PMO proxy, and risk fields."""
+def derive_stock_market_fields(
+    stock: pd.DataFrame, benchmark: pd.DataFrame, code: str, *, keep_unlabeled: bool = False
+) -> pd.DataFrame:
+    """Derive exact Alpha158 inputs, next-open label, PMO proxy, and risk fields.
+
+    ``keep_unlabeled=True`` retains the tail rows whose forward labels cannot
+    exist yet — the nightly scoring job needs today's feature row; panel builds
+    keep the default and drop them.
+    """
 
     _require(stock, STOCK_COLUMNS, f"stock:{code}")
     data = stock[list(STOCK_COLUMNS)].copy().sort_values("trade_date")
@@ -283,6 +290,24 @@ def derive_stock_market_fields(stock: pd.DataFrame, benchmark: pd.DataFrame, cod
     data["exit_price_observed"] = data["price_observed"].shift(-2).fillna(False).astype(bool)
     data["feature_available_at"] = data["trade_date"] + pd.Timedelta(hours=15)
     data["next_open_return"] = valuation_open.shift(-2).to_numpy() / valuation_open.shift(-1).to_numpy() - 1
+    # 20-trading-day executable labels: enter at t+1 open, exit at t+21 open.
+    # Purge folds by label_end_date_20d, never by a hard-coded day count.
+    data["entry_date"] = data["trade_date"].shift(-1)
+    data["label_end_date_20d"] = data["trade_date"].shift(-21)
+    entry_open = valuation_open.shift(-1).to_numpy()
+    data["next_open_return_20d"] = valuation_open.shift(-21).to_numpy() / entry_open - 1
+    # Risk targets: worst valuation during the holding closes t+1..t+20 relative
+    # to the executable entry price.  Close-based is the pre-registered primary
+    # (same construct family as the proven drawdown signal); low-based is the
+    # comparison column.  Unobserved (suspended) days fall back to the stale
+    # ffilled close, which is the price a holder was actually marked at.
+    fwd_min_close = valuation_close.iloc[::-1].rolling(20, min_periods=20).min().iloc[::-1].shift(-1)
+    data["forward_drawdown_20d"] = fwd_min_close.to_numpy() / entry_open - 1
+    valuation_low = data["adj_low"].where(
+        data["price_observed"], pd.Series(valuation_close.to_numpy(), index=data.index)
+    )
+    fwd_min_low = valuation_low.iloc[::-1].rolling(20, min_periods=20).min().iloc[::-1].shift(-1)
+    data["forward_drawdown_20d_low"] = fwd_min_low.to_numpy() / entry_open - 1
     data["turnover_20d"] = data["turnover"].rolling(20, min_periods=20).mean()
     data["abnormal_turnover_20_240"] = data["turnover_20d"] / data["turnover"].rolling(240, min_periods=240).mean()
     data["amihud_20d"] = data["amihud_1d"].rolling(20, min_periods=20).mean()
@@ -294,6 +319,8 @@ def derive_stock_market_fields(stock: pd.DataFrame, benchmark: pd.DataFrame, cod
     market_return = data["benchmark_close_return"]
     data["beta"] = stock_return.rolling(60, min_periods=60).cov(market_return) / market_return.rolling(60, min_periods=60).var()
     data["code"] = code
+    if keep_unlabeled:
+        return data
     return data.dropna(subset=["execution_at", "exit_at", "next_open_return", "benchmark_return"])
 
 
@@ -319,6 +346,16 @@ def merge_pit_inputs(
         missing = out.loc[out["universe_member"].isna(), ["signal_date", "code"]].head(5).to_dict("records")
         raise DataContractError(f"signal-date PIT universe coverage is incomplete: {missing}")
     out["universe_member"] = out["universe_member"].astype(bool)
+    # Signal-day tradability state: training-sample filters may only condition
+    # on what is known at t, never on t+1 execution outcomes.
+    signal_state = flags[["trade_date", "code", "is_suspended", "is_limit_up"]].rename(columns={
+        "trade_date": "signal_date",
+        "is_suspended": "signal_is_suspended",
+        "is_limit_up": "signal_is_limit_up",
+    })
+    out = out.merge(signal_state, on=["signal_date", "code"], how="left", validate="one_to_one")
+    if out[["signal_is_suspended", "signal_is_limit_up"]].isna().any().any():
+        raise DataContractError("signal-day PIT tradability flags are incomplete")
     execution_flags = flags[[
         "trade_date", "code", "is_listed", "is_st", "is_suspended", "is_limit_up", "is_limit_down",
     ]].rename(columns={"trade_date": "execution_date"})
@@ -397,7 +434,11 @@ def merge_pit_inputs(
 def _output_columns() -> list[str]:
     return [
         "signal_date", "execution_at", "exit_at", "feature_available_at", "code",
-        "next_open_return", "buyable", "sellable", "universe_member", "benchmark_return",
+        "entry_date", "label_end_date_20d",
+        "next_open_return", "next_open_return_20d",
+        "forward_drawdown_20d", "forward_drawdown_20d_low",
+        "signal_is_suspended", "signal_is_limit_up",
+        "buyable", "sellable", "universe_member", "benchmark_return",
         "benchmark_weight", "sector", "log_market_cap", "beta", "volatility_20d",
         "earnings_to_price", "turnover_20d", "abnormal_turnover_20_240", "amihud_20d",
         *QLIB_ALPHA158_FEATURES,
@@ -452,6 +493,10 @@ def build_panel(args: argparse.Namespace) -> dict:
     else:
         fundamental_error = f"verified PIT trailing EPS missing: {fundamental_path}"
     stock_paths = sorted(stock_dir.glob("*.parquet"))
+    # The panel's stock list is defined by the PIT universe scope, never by
+    # directory contents: files left over from other universes are ignored.
+    pit_scope_codes = set(flags["code"].astype(str).str.zfill(6))
+    stock_paths = [path for path in stock_paths if path.stem.zfill(6) in pit_scope_codes]
     if not stock_paths:
         raise DataContractError("no normalized stock parquet files")
     stock_codes = {path.stem.zfill(6) for path in stock_paths}
