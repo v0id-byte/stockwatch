@@ -220,3 +220,16 @@ OOS 2025-2026:
 - `pit_universe_daily.parquet`：三态 PIT 网格（member/listed/ST/停牌/涨跌停），member 日 UNKNOWN 0.006%
 - `stocks/`：857 只历史成员 schema-v2 双价历史（新浪主 + baostock 退市股回退，0 失败）
 - `development_panel.parquet` / `lockbox_panel.parquet` / `training_panel_v2.parquet`（immutable sha 见各 report）
+
+## 待命工件（2026-08-29 晚，尚未执行）
+
+- **GRU challenger**：`scripts/train_gru_challenger.py` 就绪——60 步 × 6 通道因果序列
+  （复用 build_sequence_features 通道定义，短通道零填充对齐），同折同标签同七道门禁，
+  预测帧走 fit_lightgbm_oos 同 schema 复用同一模拟器。晋级 = AND 逻辑（七道全过 ∧
+  retro IC ≥ LGBM+0.01 ∧ 次级指标不劣 ∧ RPi 运维可行）。**等用户协调停 llama-server
+  后在 train-direct GPU 上跑**；本地 `--max-codes` CPU smoke 已验证管线。
+- **LOCKBOX 开箱判据已冻结**：`docs/lockbox_go_no_go_v1.md`（工件 sha256 pin、
+  一次性原则、风险模型三条 GO 判据：mean IC>0 ∧ 正日占比≥0.60 ∧ enrichment<0；
+  0.60 为 ~33 个有标签交易日的功效放宽阈值）+ 一次性执行脚本
+  `scripts/evaluate_lockbox_one_shot.py`（默认拒绝，需 `--unlock-lockbox`；先逐项
+  校验 sha 再评估；次级指标只报告不判定）。开箱时机由用户决定。
