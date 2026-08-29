@@ -309,7 +309,7 @@ class DecisionEngine:
                     tech_score=tech_score,
                     sentiment=sentiment,
                     sentiment_context=sentiment_context or "- 近7日未获取到可用消息面摘要",
-                    alpha_summary=alpha_summary or "- Alpha158 摘要: 未启用",
+                    alpha_summary=alpha_summary or "- 自定义技术300摘要: 未启用",
                     lgbm_context=lgbm_context or "- LightGBM 排序预测: 未启用",
                     regime_context=regime_context,
                     north_money=north_context,

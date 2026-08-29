@@ -90,11 +90,11 @@ BUILTIN_FACTORS = [
     {
         "id": "alpha158",
         "env_key": "ENABLE_ALPHA158",
-        "name": "Alpha158 技术因子",
+        "name": "自定义技术300因子（旧模型）",
         "category": "技术面",
         "horizon": "5-20 日",
-        "source": "官方",
-        "description": "计算动量、波动、成交量结构、相对强弱和回撤等量化特征。",
+        "source": "内置",
+        "description": "旧模型的300列自定义技术特征；不是 Microsoft Qlib 标准 Alpha158。",
         "data_requirements": "个股日 K、指数日 K",
         "status": "builtin",
     },
@@ -2407,7 +2407,7 @@ def render_factor_settings(settings: dict[str, str], notice: str = "", filters: 
         <div class="options">
           <label class="option-row"><input type="checkbox" name="enable_regime" value="true"{_checked(settings.get('ENABLE_REGIME', 'false'))}>市场状态因子</label>
           <label class="option-row"><input type="checkbox" name="enable_sector" value="true"{_checked(settings.get('ENABLE_SECTOR', 'false'))}>板块强弱因子</label>
-          <label class="option-row"><input type="checkbox" name="enable_alpha158" value="true"{_checked(settings.get('ENABLE_ALPHA158', 'false'))}>Alpha158 因子</label>
+          <label class="option-row"><input type="checkbox" name="enable_alpha158" value="true"{_checked(settings.get('ENABLE_ALPHA158', 'false'))}>自定义技术300因子（旧模型）</label>
           <label class="option-row"><input type="checkbox" name="enable_calibration" value="true"{_checked(settings.get('ENABLE_CALIBRATION', 'false'))}>信号校准因子</label>
           <label class="option-row"><input type="checkbox" name="enable_lgbm" value="true"{_checked(settings.get('ENABLE_LGBM', 'false'))}>LightGBM 模型因子</label>
           <label class="option-row"><input type="checkbox" name="enable_propagation" value="true"{_checked(settings.get('ENABLE_PROPAGATION', 'false'))}>关联补涨观察</label>

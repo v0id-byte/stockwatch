@@ -206,15 +206,15 @@ class BotService:
             return "", ""
         try:
             import pandas as pd
-            from analysis.factors import compute_alpha158
+            from analysis.factors import compute_custom_technical_300
 
             market_df = pd.DataFrame(self.market.get_index_kline("sh000001", limit=320))
-            factors = compute_alpha158(pd.DataFrame(kline), market_df)
+            factors = compute_custom_technical_300(pd.DataFrame(kline), market_df)
             alpha_summary = ""
             lgbm_context = ""
             if self.cfg.enable_alpha158:
-                from analysis.factors import summarize_alpha158_cross_section
-                alpha_summary = summarize_alpha158_cross_section({code: factors}).get(code, "")
+                from analysis.factors import summarize_custom_technical_300_cross_section
+                alpha_summary = summarize_custom_technical_300_cross_section({code: factors}).get(code, "")
             if self.cfg.enable_lgbm:
                 from analysis.lgbm import LgbmRanker, format_lgbm_context
                 ranker = LgbmRanker(self.cfg.lgbm_model_path)

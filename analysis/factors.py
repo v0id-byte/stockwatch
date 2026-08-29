@@ -1,11 +1,10 @@
-"""Alpha158 factor calculation implemented with pandas.
+"""StockWatch's legacy 300-column custom technical feature family.
 
-References:
-    Qlib: A AI-oriented Quantitative Investment Platform
-        Liu et al. (2021) — https://arxiv.org/abs/2009.11189
-    101 Formulaic Alphas (WorldQuant style)
-        Kakushadze (2016) — https://arxiv.org/abs/1601.00991
-    This implementation follows Qlib's Alpha158/Alpha360 feature definitions.
+This module was historically named ``Alpha158`` but differs from Microsoft
+Qlib in feature count, windows, and several formulas.  Keep the old exports as
+compatibility aliases for existing models; new research must use the explicit
+``CUSTOM_TECHNICAL_300_*`` names here or the exact implementation in
+``analysis.alpha158``.
 """
 from __future__ import annotations
 
@@ -19,21 +18,35 @@ from loguru import logger
 warnings.filterwarnings("ignore", category=PerformanceWarning)
 
 
-WINDOWS = [5, 10, 20, 30, 60, 120, 250]
-ROLLING_FEATURES = [
+CUSTOM_TECHNICAL_WINDOWS = [5, 10, 20, 30, 60, 120, 250]
+CUSTOM_TECHNICAL_ROLLING_FEATURES = [
     "ROC", "MA", "STD", "BETA", "RSQR", "RESI", "MAX", "MIN", "QTLU", "QTLD",
     "RANK", "RSV", "IMAX", "IMIN", "IMXD", "CORR", "CORD", "CNTP", "CNTN",
     "CNTD", "SUMP", "SUMN", "SUMD", "VMA", "VSTD", "WVMA", "VSUMP",
     "VSUMN", "VSUMD", "RET", "MOM", "DD", "UPR", "DNR", "SHARPE",
     "VOLZ", "TURN", "AMTMA", "ILLIQ", "PVCHG", "RELV",
 ]
-BASE_FEATURES = ["OPEN0", "HIGH0", "LOW0", "VWAP0"]
-KBAR_FEATURES = ["KMID", "KLEN", "KMID2", "KUP", "KUP2", "KLOW", "KLOW2", "KSFT", "KSFT2"]
-ALPHA158_FEATURES = (
-    BASE_FEATURES
-    + KBAR_FEATURES
-    + [f"{name}{window}" for window in WINDOWS for name in ROLLING_FEATURES]
+CUSTOM_TECHNICAL_BASE_FEATURES = ["OPEN0", "HIGH0", "LOW0", "VWAP0"]
+CUSTOM_TECHNICAL_KBAR_FEATURES = [
+    "KMID", "KLEN", "KMID2", "KUP", "KUP2", "KLOW", "KLOW2", "KSFT", "KSFT2",
+]
+CUSTOM_TECHNICAL_300_FEATURES = (
+    CUSTOM_TECHNICAL_BASE_FEATURES
+    + CUSTOM_TECHNICAL_KBAR_FEATURES
+    + [
+        f"{name}{window}"
+        for window in CUSTOM_TECHNICAL_WINDOWS
+        for name in CUSTOM_TECHNICAL_ROLLING_FEATURES
+    ]
 )
+
+# Backward compatibility for tracked models and existing training scripts. These
+# names refer to custom300, not to Microsoft Qlib Alpha158.
+WINDOWS = CUSTOM_TECHNICAL_WINDOWS
+ROLLING_FEATURES = CUSTOM_TECHNICAL_ROLLING_FEATURES
+BASE_FEATURES = CUSTOM_TECHNICAL_BASE_FEATURES
+KBAR_FEATURES = CUSTOM_TECHNICAL_KBAR_FEATURES
+ALPHA158_FEATURES = CUSTOM_TECHNICAL_300_FEATURES
 
 # Conservative cross-sectional alpha candidate set. These factors are deliberately
 # kept small and interpretable, but the trained model must still pass the
@@ -136,7 +149,11 @@ def _rolling_argmin(series: pd.Series, window: int) -> pd.Series:
 
 
 def compute_alpha158_frame(kline_df: pd.DataFrame, market_df: pd.DataFrame | None = None) -> pd.DataFrame:
-    """Return an all-date Alpha158 frame; latest row is used online."""
+    """Return the legacy custom300 frame (deprecated compatibility name).
+
+    This is not Microsoft Qlib Alpha158. New exact-Alpha158 research should use
+    :func:`analysis.alpha158.compute_qlib_alpha158_frame`.
+    """
     df = _clean_frame(kline_df)
     if df.empty:
         return pd.DataFrame(columns=ALPHA158_FEATURES)
@@ -250,8 +267,7 @@ def compute_alpha158_frame(kline_df: pd.DataFrame, market_df: pd.DataFrame | Non
 
 
 def compute_alpha158(kline_df: pd.DataFrame, market_df: pd.DataFrame | None = None) -> dict:
-    """
-    Compute latest Alpha158 values.
+    """Compute latest legacy custom300 values (deprecated compatibility name).
 
     kline_df columns: open/high/low/close/volume/amount; optional trade_date.
     market_df is aligned by trade_date when present and is used for BETA/RSQR/RESI.
@@ -261,6 +277,11 @@ def compute_alpha158(kline_df: pd.DataFrame, market_df: pd.DataFrame | None = No
         return {name: 0.0 for name in ALPHA158_FEATURES}
     latest = factors.iloc[-1]
     return {name: float(latest.get(name, 0.0)) for name in ALPHA158_FEATURES}
+
+
+# Canonical, honest names for callers that still need the old tracked model.
+compute_custom_technical_300_frame = compute_alpha158_frame
+compute_custom_technical_300 = compute_alpha158
 
 
 def _factor_value(factors: dict, name: str) -> float:
@@ -375,7 +396,7 @@ def _summarize_single_alpha158(factors: dict) -> str:
 
     valid_count = sum(1 for name in ALPHA158_FEATURES if name in factors)
     return (
-        "Alpha158 摘要:\n"
+        "自定义技术300摘要:\n"
         f"  已计算因子: {valid_count}/{len(ALPHA158_FEATURES)}\n"
         f"  重点信号: {'；'.join(signals[:5])}"
     )
@@ -392,7 +413,7 @@ def summarize_alpha158_cross_section(factors_by_code: dict[str, dict]) -> dict[s
             code: _summarize_single_alpha158(row.to_dict())
             for code, row in frame.iterrows()
         }
-        logger.info(f"Alpha158 单票摘要生成: {len(summaries)} 只, {len(ALPHA158_FEATURES)} 个因子")
+        logger.info(f"自定义技术300单票摘要生成: {len(summaries)} 只, {len(ALPHA158_FEATURES)} 个因子")
         return summaries
 
     std = frame.std(axis=0).replace(0, np.nan)
@@ -405,9 +426,12 @@ def summarize_alpha158_cross_section(factors_by_code: dict[str, dict]) -> dict[s
         pos = ", ".join(f"{name}(+{value:.1f}sigma)" for name, value in top.items())
         neg = ", ".join(f"{name}({value:.1f}sigma)" for name, value in bottom.items())
         summaries[code] = (
-            "Alpha158 摘要:\n"
+            "自定义技术300摘要:\n"
             f"  最显著的正面信号: {pos}\n"
             f"  最显著的负面信号: {neg}"
         )
-    logger.info(f"Alpha158 因子摘要生成: {len(summaries)} 只, {len(ALPHA158_FEATURES)} 个因子")
+    logger.info(f"自定义技术300因子摘要生成: {len(summaries)} 只, {len(ALPHA158_FEATURES)} 个因子")
     return summaries
+
+
+summarize_custom_technical_300_cross_section = summarize_alpha158_cross_section

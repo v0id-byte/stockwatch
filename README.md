@@ -10,7 +10,7 @@
 
 中文 | [English](#english)
 
-**关键词**：A股盯盘提醒、家庭盯盘助手、少盯盘、股票机器人、飞书机器人、A股新闻分析、股票公告解读、LightGBM 排序模型、Alpha158 因子、AKShare、macOS/Linux 部署、树莓派 24h 服务。
+**关键词**：A股盯盘提醒、家庭盯盘助手、少盯盘、股票机器人、飞书机器人、A股新闻分析、股票公告解读、LightGBM 排序模型、自定义技术300因子、Qlib Alpha158 研究基线、AKShare、macOS/Linux 部署、树莓派 24h 服务。
 
 StockWatch 不是自动交易工具，也不是荐股软件。它更像一个给家人用的 A 股提醒机器人：你把自选股、买入价和盯价告诉它，它会定时分析行情、公告、新闻、资金流、技术面和持仓风险；如果跌破止损、接近目标价、出现重大消息或盘面异动，再通过飞书提醒你去看。目标是把“持续盯盘”变成“事件提醒”，减少无意义刷屏和情绪消耗。
 
@@ -40,7 +40,7 @@ StockWatch 的定位是**自选股盯盘提醒、公开信息聚合和持仓风�
 - **飞书自然语言问答**：支持股票代码、股票名称、买入跟踪、盯价、取消盯价，也支持“现在行情怎么样”这类自然输入。
 - **深度问答**：可回答“600449 最近一周走势如何”“宁夏建材重组怎么样”“我想看看贵州茅台行情怎么样”等问题，并优先引用公告/新闻来源。
 - **消息面分析**：抓取近况新闻、公司公告、研报、资金流、财务快照和市场关注信息，交给模型生成可读建议。
-- **量化因子**：计算扩展版 Alpha158/Alpha300 风格因子，覆盖动量、波动、Beta、流动性冲击、相对强弱、回撤和成交量结构。
+- **量化因子**：线上旧模型使用自定义技术300因子（不是标准 Qlib Alpha158）；研究目录另有按 Qlib 官方公式实现的 exact Alpha158，用于冻结样本外基线，二者不再混称。
 - **LightGBM 排序模型**：离线训练 A 股横截面排序模型，线上作为辅助信号参与解释。
 - **关联补涨观察**：可识别当日领涨股，并从本地历史库中扩展历史 1 日滞后相关的候选股，生成“可能未充分反应”的传播特征。
 - **本地 Web 控制台**：展示最近运行、提醒卡片、持仓跟踪、盯价提醒和 5 日信号复盘，也能配置模型、渠道、远程访问、开关和个性化。
@@ -507,7 +507,7 @@ ENABLE_SECTOR=false
 
 建议开启顺序：`ENABLE_REGIME` → `ENABLE_SECTOR` → `ENABLE_ALPHA158` → `ENABLE_PROPAGATION` → `ENABLE_CALIBRATION` → `ENABLE_LGBM`。
 
-### LightGBM 离线训练
+### 冻结样本外量化研究
 
 ```bash
 # 在 Mac 上
@@ -516,11 +516,9 @@ pip install -r requirements.txt
 pip install -r requirements-train.txt
 
 python scripts/bootstrap_history.py
-python scripts/build_training_set.py
-python scripts/train_lgbm.py
-
-# 输出 models/lgbm.txt 和 models/lgbm_meta.json 后，拷到部署机器
-scp models/lgbm.* <user>@<host>:~/.stockwatch/models/
+python scripts/build_pit_baseline_exposures.py
+python scripts/build_frozen_oos_panel.py
+python scripts/evaluate_frozen_oos_baselines.py
 ```
 
 只刷新回测基准、不重下个股历史时，可运行：
@@ -529,10 +527,16 @@ scp models/lgbm.* <user>@<host>:~/.stockwatch/models/
 STOCKWATCH_BENCHMARK_ONLY=true python scripts/bootstrap_history.py
 ```
 
-bootstrap 会同时缓存沪深300与中证500，并把本次指数成分精确代码清单写入 manifest；训练集只读取该清单内的 parquet，避免旧下载文件悄悄改变 universe。成分清单仍标记为 `current_snapshot_not_point_in_time`，不能冒充逐日历史成分。
+bootstrap 会按请求的完整日期区间缓存沪深300与中证500，并把下载范围和行情单位写入 manifest。若只有当前指数成分，它只用于下载范围并标记为 `current_snapshot_not_point_in_time`；研究会拒绝继续，直到提供带逐日成员、上市、ST、停牌和涨跌停状态的 `pit_universe_daily.parquet`。PIT 文件还必须通过指数逐日成员数量、布尔类型、重复键和冲突状态检查，不会再把当前名单或残缺历史冒充历史股票池。
+
+`evaluate_frozen_oos_baselines.py` 独立比较三条路线：exact Qlib Alpha158、CH3/CH4 风格基线、CSI500 残差指数增强。统一门槛包括 next-open 可执行口径、交易成本、至少126个冻结交易日、正 IC/十分位差、组合 CAGR 至少5%、同时跑赢中证500和同股票池等权组合、至少60%折为正；CSI500 增强还受跟踪误差限制。任一必需 PIT 字段缺失就标记 `BLOCKED`，不会补零或回填当前快照。
+
+旧 `build_training_set.py` 的 close-to-close 标签无法在信号时点真实执行，现已默认禁用。只有复现旧研究产物时才可显式设置 `STOCKWATCH_ALLOW_LEGACY_UNEXECUTABLE_LABELS=true`；该输出不能用于部署或收益验收。
+
+截至2026-07-16，代码门禁和三条基线已经就绪，但真实运行仍因缺少完整 `pit_universe_daily.parquet`、历史行业 PIT、可验证财报 vintage 和中证500历史每日权重而 `BLOCKED`，尚无新的可审计收益结果，也没有新模型部署。
 
 部署端只在 `ENABLE_LGBM=true` 时加载模型；模型缺失会记录日志并跳过。模型加载还会读取 `lgbm_meta.json` 的真样本外健康检查：若 `test return IC < 0` 或 `decile 9-0 spread < 0`，线上推理会拒绝输出 LightGBM 排序分，避免把失败模型喂给决策引擎。研究调试时可临时设 `STOCKWATCH_LGBM_ALLOW_UNVALIDATED=true` 覆盖该门禁。
-训练脚本会按标签周期在 train/validation/test 边界做 purge，避免 20 日前瞻标签跨边界泄漏。
+冻结 OOS 脚本会在 train/validation/test 边界做双侧 purge，避免前瞻标签跨边界泄漏。
 `lgbm_meta.json` 里的 top-k 收益是逐交易日的前瞻收益均值，不是账户累计收益；同时会输出 IC、return-IC、十分位收益、非重叠抽样诊断，以及**逐年横截面 IC**（`per_year_ic`）。
 
 **模型构建方式（v2.1 起）**：默认特征集为 `robust`，分三类——短/中期反转（RET/RELV/ROC）、超跌位置（QTLD/QTLU/MA/IMIN）、低换手低关注（TURN/VOLZ/AMTMA/VMA）。训练前对每个交易日做**横截面分位归一化**（去掉随时间漂移的因子量纲），目标为横截面排序标签回归。线上推理在 `analysis/lgbm.py` 里用同样的横截面归一化对当前股票池打分，并对历史不足的次新股跳过，保证训练/线上一致。注意：最近一次 2025-11-17 之后的真样本外复核显示，当前 `robust` / `all` / `stable` 快照的 return IC 或 decile spread 仍为负，均会被标记为 **UNVALIDATED**；在重建出通过健康门禁的新模型前，LightGBM 只能作为研究产物，不应进入实盘决策。
@@ -540,7 +544,7 @@ bootstrap 会同时缓存沪深300与中证500，并把本次指数成分精确�
 回到全量或旧版因子子集训练（用于对比）：
 
 ```bash
-STOCKWATCH_LGBM_FEATURE_SET=all python scripts/train_lgbm.py     # 全部 Alpha158
+STOCKWATCH_LGBM_FEATURE_SET=all python scripts/train_lgbm.py     # 全部旧模型自定义技术300
 STOCKWATCH_LGBM_FEATURE_SET=stable python scripts/train_lgbm.py  # 旧版子集（含不稳定风险因子）
 ```
 
@@ -592,10 +596,10 @@ STOCKWATCH_INDEX_SYMBOLS=000300,000905,000852,932000 python scripts/bootstrap_hi
 
 **事件连带（板块传导提示）**：同时开启 `ENABLE_SECTOR=true` 后，事件层会用缓存的板块映射做连带——当**同板块的其他股票**出现事件（如解禁/减持/业绩预告）时，给你的自选股加一条"同板块(X) 某票 出现〔事件〕"的情绪参考。**注意**：上表实测同板块补涨次日超额仅 +0.04%、胜率≈50%，所以这是**板块情绪情境，不是补涨预测**，措辞里也写明了。已有的 `analysis/propagation.py` 则提供另一维度的价格 lead-lag 连带。
 
-`build_training_set.py` 默认会生成关联补涨传播特征：当某只股票成为放量领涨股时，系统用过去窗口估计“领涨股前一日收益 → 候选股当日收益”的滞后相关，并把领涨幅度、放量、相关强度、候选未反应程度和传播分写入训练集。这个过程只使用当日及以前可见数据；如需关闭：
+旧 `build_training_set.py` 在显式复现模式下会生成关联补涨传播特征；该训练集整体仍受不可执行 close-to-close 标签限制，不属于新冻结 OOS 流程。如需复现并关闭传播：
 
 ```bash
-STOCKWATCH_ENABLE_PROPAGATION_FEATURES=false python scripts/build_training_set.py
+STOCKWATCH_ALLOW_LEGACY_UNEXECUTABLE_LABELS=true STOCKWATCH_ENABLE_PROPAGATION_FEATURES=false python scripts/build_training_set.py
 ```
 
 线上启用 `ENABLE_PROPAGATION=true` 后，系统会先在初始分析池里识别领涨股，再从 `PROPAGATION_HISTORY_DIR` 的本地历史 parquet 中扩展最多 `PROPAGATION_MAX_CANDIDATES` 只滞后相关候选。推送文案会标注“关联补涨观察”，它只表示值得复核，不代表确定上涨或买入建议。
@@ -688,6 +692,22 @@ cninfo 的历史公告接口也支持 `stock` 留空后的全市场日期窗口�
 
 `check_sentiment_pit.py` 是合成数据断言，覆盖 15:00 cutoff、周末滚动和 available_at 后移的 shift 测试。
 
+正文/PDF 研究使用独立事件库，不修改生产 SQLite：
+
+```bash
+.venv/bin/python scripts/backfill_announcement_documents.py \
+  --start 2022-01-01 --limit-per-category-year 250 --workers 4 --keep-pdf
+.venv/bin/python scripts/build_structured_event_features.py
+.venv/bin/python scripts/evaluate_structured_event_strategy.py
+
+.venv/bin/python scripts/build_sequence_features.py
+.venv/bin/python scripts/evaluate_curve_model.py
+```
+
+`backfill_announcement_documents.py` 从已有 CNINFO 元数据中按年度时间分层抽取业绩、回购、增减持、重大合同、问询/处罚、资本行动六类，保存 PDF、gzip 正文、`published_at` / `available_at`、PDF/正文 SHA-256、抽取方式和 `extractor_version`；扫描件会在本机存在 `pdftoppm + tesseract(chi_sim)` 时走 OCR。所有任务可重跑，已完成文档自动跳过。当前 2026-07-10 研究库为 8,867 份真实 PDF/正文；进入当前训练 universe 的 2,792 个事件只覆盖约 3.14% 的 20 日股票窗口，因此仍是**时间分层部分库**，零值不能冒充“市场没有事件”。
+
+同口径 walk-forward 结果仍为 `REJECTED`：200 维数值 OHLCV 序列、结构化事件 LightGBM、事件+技术融合和稀疏事件驱动策略均未同时跑赢等权 universe 与中证500。基础设施可用于公告解释、风险标签和未来扩库研究，但不进入生产选股；2026 单独业绩事件的正结果只有 6 个观察点且实际投资 3 期，不构成通过。
+
 ---
 
 ## Roadmap / 欢迎贡献
@@ -727,7 +747,7 @@ StockWatch 站在这些开源项目之上。以下列出直接依赖或训练/�
 
 | 项目 | 用途 | 许可证 |
 | --- | --- | --- |
-| [Microsoft Qlib](https://github.com/microsoft/qlib) | Alpha158 因子命名和量化研究范式的概念参考；本项目为独立 pandas 实现 | MIT |
+| [Microsoft Qlib](https://github.com/microsoft/qlib) | `analysis/alpha158.py` 对照官方公式的研究基线；线上旧 custom300 与其明确分离 | MIT |
 | [AKShare](https://github.com/akfamily/akshare) | A 股行情、新闻、公告、资金流、板块和财务数据接口 | MIT |
 | [LightGBM](https://github.com/microsoft/LightGBM) | 横截面排序/回归模型训练与推理 | MIT |
 | [pandas](https://github.com/pandas-dev/pandas) | 表格数据处理、时间序列和训练集构建 | BSD-3-Clause |
@@ -784,7 +804,7 @@ It is not an auto-trading system or a stock-picking promise. The goal is to turn
 - Natural-language market questions such as "How is the market today?".
 - Research-style replies for questions such as "How is 600449 doing this week?" or "What is the restructuring status of Ningxia Building Materials?".
 - Source-aware context from company announcements, exchange-style disclosures, news, research reports, fund flow, financial data and market attention.
-- Alpha158/Alpha300-style pandas factors covering momentum, volatility, beta, liquidity shock, relative strength, drawdown and volume structure.
+- A legacy custom 300-column technical family for the online helper, explicitly separated from an exact Qlib Alpha158 research baseline used only by frozen OOS studies.
 - Optional LightGBM cross-sectional ranking model (regression on cross-sectional rank) trained offline and used online as an auxiliary signal.
 - Optional lead-lag propagation watch: detect today's leaders, expand historically lagged candidates from the local history store and score potential underreaction.
 - Local web console with mobile reminder cards, remote-access settings and signal quality reports based on SQLite history.
@@ -1127,7 +1147,23 @@ nohup .venv/bin/python scripts/backfill_announcements.py --mode by-code --worker
 
 `backfill_announcements.py` persists each chunk immediately into SQLite and tracks `pending/done/failed` in `announcement_fetch_progress`. `--status` prints local resumable progress without touching CNINFO; `--only-failed` retries just the failed tail after an overnight run. `build_sentiment_features.py` reads only the local raw store, and date-only or midnight CNINFO timestamps are rolled conservatively to the next trading day.
 
-For LightGBM offline training:
+Full-text/PDF research uses a separate event library and never mutates the production SQLite database:
+
+```bash
+.venv/bin/python scripts/backfill_announcement_documents.py \
+  --start 2022-01-01 --limit-per-category-year 250 --workers 4 --keep-pdf
+.venv/bin/python scripts/build_structured_event_features.py
+.venv/bin/python scripts/evaluate_structured_event_strategy.py
+
+.venv/bin/python scripts/build_sequence_features.py
+.venv/bin/python scripts/evaluate_curve_model.py
+```
+
+The document backfill time-stratifies six classes by year (earnings, buybacks, holding changes, major contracts, inquiries/penalties, and capital actions), then stores the PDF, gzipped text, `published_at` / `available_at`, PDF/text SHA-256, extraction method, and `extractor_version`. Scanned PDFs use `pdftoppm` plus `tesseract(chi_sim)` when installed. The 2026-07-10 research library contains 8,867 real documents, but only 2,792 events intersect the current training universe and the 20-day feature window is nonzero on about 3.14% of rows. It remains a time-stratified partial library, so zero cannot be interpreted as “no market event.”
+
+Identical-fold walk-forward checks rejected the 200-feature numeric OHLCV sequence, structured-event LightGBM, event-plus-technical blend, and sparse event strategy. The infrastructure is useful for auditable announcement explanations, risk labels, and future corpus expansion, but none of these signals enters production ranking.
+
+For frozen OOS quant research:
 
 ```bash
 python -m venv .venv
@@ -1136,8 +1172,9 @@ pip install -r requirements.txt
 pip install -r requirements-train.txt
 
 python scripts/bootstrap_history.py
-python scripts/build_training_set.py
-python scripts/train_lgbm.py
+python scripts/build_pit_baseline_exposures.py
+python scripts/build_frozen_oos_panel.py
+python scripts/evaluate_frozen_oos_baselines.py
 ```
 
 Refresh benchmark history without redownloading every stock:
@@ -1146,14 +1183,20 @@ Refresh benchmark history without redownloading every stock:
 STOCKWATCH_BENCHMARK_ONLY=true python scripts/bootstrap_history.py
 ```
 
-Bootstrap caches both CSI300 and CSI500 and records the exact constituent snapshot in the manifest. Training reads only those listed parquet files so stale downloads cannot silently change the universe. The snapshot remains labelled `current_snapshot_not_point_in_time`; it is not historical daily membership.
+Bootstrap fetches CSI300 and CSI500 for the full requested date range and records the data contract in the manifest. A current constituent snapshot is download scope only. Research stays fail-closed until `pit_universe_daily.parquet` provides daily membership, listing, ST, suspension and price-limit status and passes expected member-count, boolean-type, duplicate-key and conflict checks.
+
+`evaluate_frozen_oos_baselines.py` independently evaluates exact Qlib Alpha158, CH3/CH4-style predictors, and CSI500 residual index enhancement. The common gate requires executable next-open timing, costs, at least 126 frozen days, positive IC and decile spread, portfolio CAGR of at least 5%, positive net excess versus both CSI500 and the same-panel equal-weight universe, and at least 60% positive folds. CSI500 enhancement also has a realized tracking-error limit. Missing PIT inputs produce `BLOCKED`; current snapshots and zeros are never substituted.
+
+The legacy `build_training_set.py` close-to-close label is not executable at the signal timestamp and is disabled by default. `STOCKWATCH_ALLOW_LEGACY_UNEXECUTABLE_LABELS=true` exists only to reproduce old research artifacts; those artifacts are not deployable evidence.
+
+As of 2026-07-16 the code gates and three baseline families are implemented, but the real run remains `BLOCKED` by missing complete daily PIT universe status, historical industry membership, verified accounting vintages, and historical daily CSI500 weights. There is no new auditable return result and no newly deployed model.
 
 Copy `models/lgbm.txt` and `models/lgbm_meta.json` to the deployment machine under `~/.stockwatch/models/`, then set `ENABLE_LGBM=true`. The model still will not be used unless the meta file passes the health gate above. For research-only debugging, set `STOCKWATCH_LGBM_ALLOW_UNVALIDATED=true`.
 
-`build_training_set.py` generates lead-lag propagation features by default. For each date, it detects volume-confirmed leaders, estimates whether candidates historically reacted one trading day later, and adds compact propagation fields such as leader return, lag correlation, underreaction and propagation score. Disable this with:
+The legacy `build_training_set.py` can generate lead-lag propagation features only in explicit reproduction mode. Its overall close-to-close label remains non-executable and is outside the new frozen OOS path. To reproduce it without propagation:
 
 ```bash
-STOCKWATCH_ENABLE_PROPAGATION_FEATURES=false python scripts/build_training_set.py
+STOCKWATCH_ALLOW_LEGACY_UNEXECUTABLE_LABELS=true STOCKWATCH_ENABLE_PROPAGATION_FEATURES=false python scripts/build_training_set.py
 ```
 
 For online candidate expansion, set `ENABLE_PROPAGATION=true` and keep `PROPAGATION_HISTORY_DIR` pointed at the local parquet history created by `scripts/bootstrap_history.py`. The alert wording is deliberately “propagation watch”; it is an auxiliary research signal, not a promise that a related stock will rise.
@@ -1193,7 +1236,7 @@ This project directly depends on or conceptually references the following open-s
 
 | Project | Usage | License |
 | --- | --- | --- |
-| [Microsoft Qlib](https://github.com/microsoft/qlib) | Conceptual reference for Alpha158 naming and quantitative research workflow; StockWatch uses an independent pandas implementation | MIT |
+| [Microsoft Qlib](https://github.com/microsoft/qlib) | Formula reference for the research-only exact Alpha158 baseline in `analysis/alpha158.py`; the legacy online custom300 family is separate | MIT |
 | [AKShare](https://github.com/akfamily/akshare) | A-share market data, news, announcements, fund flow, sectors and financial data | MIT |
 | [LightGBM](https://github.com/microsoft/LightGBM) | Cross-sectional ranking/regression model training and inference | MIT |
 | [pandas](https://github.com/pandas-dev/pandas) | DataFrames, time series and training set construction | BSD-3-Clause |

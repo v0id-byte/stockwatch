@@ -62,7 +62,7 @@ def test():
 
     try:
         from utils.storage import Storage
-        from analysis.factors import compute_alpha158
+        from analysis.factors import compute_custom_technical_300
         import pandas as pd
         storage = Storage()
         model = storage.get_latest_calibration_model("BUY")
@@ -74,8 +74,8 @@ def test():
              "volume": 100000 + i * 1000, "amount": 0}
             for i in range(70)
         ])
-        factors = compute_alpha158(demo_df, demo_df)
-        print(f"✅ Alpha158 可计算 → {len(factors)} 个因子")
+        factors = compute_custom_technical_300(demo_df, demo_df)
+        print(f"✅ 自定义技术300可计算 → {len(factors)} 个因子")
         from analysis.lgbm import LgbmRanker
         from config import get_config
         cfg = get_config()

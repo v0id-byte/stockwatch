@@ -274,7 +274,7 @@ def once():
             f"{kline_fail} 只K线获取失败" if kline_fail else None, kline_ok,
         )
 
-    # 4. 技术分析 + Alpha158（串行）
+    # 4. 技术分析 + 旧模型自定义技术300（串行）
     llm_calls = 0
     decisions = []
 
@@ -301,10 +301,10 @@ def once():
         if factor_needed:
             try:
                 import pandas as pd
-                from analysis.factors import compute_alpha158
-                decisions[-1]["factors"] = compute_alpha158(pd.DataFrame(kline), market_df)
+                from analysis.factors import compute_custom_technical_300
+                decisions[-1]["factors"] = compute_custom_technical_300(pd.DataFrame(kline), market_df)
             except Exception as e:
-                logger.warning(f"Alpha158 计算失败 {code}: {e}")
+                logger.warning(f"自定义技术300计算失败 {code}: {e}")
                 decisions[-1]["factors"] = {}
 
     alpha_contexts = {}
@@ -328,10 +328,10 @@ def once():
     factor_map = {d["code"]: d.get("factors", {}) for d in decisions if d.get("factors")}
     if cfg.enable_alpha158 and factor_map:
         try:
-            from analysis.factors import summarize_alpha158_cross_section
-            alpha_contexts = summarize_alpha158_cross_section(factor_map)
+            from analysis.factors import summarize_custom_technical_300_cross_section
+            alpha_contexts = summarize_custom_technical_300_cross_section(factor_map)
         except Exception as e:
-            logger.warning(f"Alpha158 摘要生成失败: {e}")
+            logger.warning(f"自定义技术300摘要生成失败: {e}")
     if cfg.enable_lgbm and factor_map:
         try:
             from analysis.lgbm import LgbmRanker, format_lgbm_context
