@@ -174,3 +174,49 @@ OOS 2025-2026:
 - 若未来上线排除层，说明它是“等权/小盘暴露 + 风险排除”的风控叠加，不是 alpha 引擎。
 
 研究上，这一轮可以结题。负结果是有效结果: 它阻止了把家人账户暴露给未经证实的主动选股模型。
+
+---
+
+# 第四轮：训练重启（2026-08-29）
+
+完整协议、九项 P0 修正与执行记录见当日会话；本节只存结论与产物指针。
+
+## 结论
+
+1. **风险模型（回撤预测）通过全部五道预注册门禁，成为首个可部署模型。**
+   LightGBM，目标 `min(close[t+1..t+20])/open[t+1]-1`（截面 rank，higher=safer），
+   deploy 特征集 = 精确 Qlib Alpha158 + 23 个非重叠鲁棒因子，CSI500 PIT universe，
+   purged expanding walk-forward：
+   - G1 回撤 IC：retro 窗（2025-01 起）mean 0.272 / ICIR 1.30 / 正比率 89.6%（全样本 0.278/1.42/91.4%）
+   - G2 坏尾富集：最差十分位预期回撤 −8.2% vs 全池 −5.4%；真实回撤 ≤−15% 识别 lift 2.47
+   - G3 排除层：等权池最大回撤 −16.9%→−15.5%（+1.3pct）且总收益 +4.3pct（与第一轮"牺牲收益换回撤"的排除层不同）
+   - G4 同数量随机对照 200 次：实际改善位于 100 分位
+   - G5 高波动对照：0.0132 > 0.0096，非变相去波动
+   报告：`~/.stockwatch/history/risk_model_v2_report.json`；模型：`models/lgbm_v2_risk.txt`（meta 含方向契约，健康门禁走 drawdown IC 分支）。
+
+2. **收益模型再次 REJECTED**（chronological test IC −0.069；walk-forward 七道门禁 REJECTED），
+   与前三轮一致。健康门禁正确拦截，线上不加载。
+   报告：`~/.stockwatch/history/retrospective_candidate_report.json`。
+
+3. **新旧风险构念诊断**：可执行化目标与旧强信号日截面 Spearman 0.98、坏尾重叠 0.91——旧先验可沿用。
+
+4. **Replay parity**：生产打分路径（core/model_scoring，复用训练同款下载与特征代码）
+   与离线面板 20 个抽样日 × 40 股 × 181 特征共 144,800 项对账零失配。
+
+## 纪律要点（本轮新增且必须延续）
+
+- 2025-01 起的窗口一律称 **retrospective OOS**（已被历史研究观察）；PASS ≠ 未见数据确认。
+- **LOCKBOX**（2026-06-12→2026-08-26，45,421 行）物理分文件封存，只暴露存在性四项事实；
+  开箱前必须先冻结 go/no-go 判据文档；开箱一次性，只做 go/no-go。
+- 真正的验收 = 部署后 ≥3 个月 prospective paper-monitor。
+- 生产打分契约：夜间在 CSI500 全池上批打分（与训练同一 reference universe 的截面 rank），
+  runner/bot 只查表（`model_scores`），绝不在小 watchlist 批上现算模型特征。
+- LLM 公告特征（MiniMax 打分进行中）标记 NOT_DEPLOYABLE_V1，仅供三臂 ablation
+  （deploy / +counts / +counts+semantic）exploratory 研究。
+
+## 数据资产（本轮新建）
+
+- `csi500_membership_pit.parquet`：官方锚点+完整调样链逆向回放（含 300114→302132 换码处理），1025 日 × 精确 500 名
+- `pit_universe_daily.parquet`：三态 PIT 网格（member/listed/ST/停牌/涨跌停），member 日 UNKNOWN 0.006%
+- `stocks/`：857 只历史成员 schema-v2 双价历史（新浪主 + baostock 退市股回退，0 失败）
+- `development_panel.parquet` / `lockbox_panel.parquet` / `training_panel_v2.parquet`（immutable sha 见各 report）
