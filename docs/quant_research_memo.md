@@ -339,3 +339,14 @@ CSI500 universe 上**没有可利用信息**，模型把这些列当噪声吸收
 
 **按冻结动作表进入 Stage 8：RPi 部署风险模型**（scp 模型 + `.env` 只追加 +
 `main.py score` 夜间任务 + 重启三服务 + 验证），随后启动 prospective paper-monitor。
+
+### Stage 8 部署阻塞记录（2026-08-30）
+
+GO 后尝试部署：deploy Pi（v0id@mc.void1211.com:22）**整机疑似离线**——WAN 22 超时；
+经 pianotuner 主机（同内网跳板）扫描 192.168.3.0/24：12 台活主机无一开放 SSH
+（22/2222/1211 全关），10.9.9.0/24 为空；pianotuner 主机本身无 stockwatch 单元
+（两台确为不同机器）。**意味着 stockwatch 三服务当前实际停机。** 待用户恢复
+硬件后执行：`git pull --ff-only`（代码已全部在 GitHub main）→ scp
+`models/lgbm_v2_risk.txt` + `_meta.json` 至 `~/.stockwatch/models/` → `.env`
+追加 `ENABLE_RISK_MODEL=true` → 配置每日收盘后 `python main.py score` 任务 →
+重启三服务 → 首晚验证 model_scores 落库 500/500。
