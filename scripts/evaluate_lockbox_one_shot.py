@@ -30,7 +30,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from analysis.alpha158 import QLIB_ALPHA158_FEATURES  # noqa: E402
+from analysis.factors import compute_alpha158_frame  # noqa: E402
 from analysis.oos_baselines import DataContractError, validate_pit_panel  # noqa: E402
+from scripts.build_training_panel_v2 import CUSTOM_FEATURES  # noqa: E402
+from scripts.build_training_set import _factor_input  # noqa: E402
 from scripts.split_development_lockbox import LOCKBOX_START  # noqa: E402
 
 TARGET = "forward_drawdown_20d"
@@ -138,12 +141,47 @@ def main() -> None:
     features = list(meta["features"])
     booster = lgb.Booster(model_file=str(paths["models/lgbm_v2_risk.txt"]))
 
-    columns = ["signal_date", "code", "universe_member", TARGET, *features]
+    # Procedure amendment (documented in the report): the split panels carry
+    # only the Alpha158 columns — the 23 custom deploy features were computed
+    # later, on the development segment only.  They are deterministic causal
+    # transforms of the bars, so they are recomputed here with the exact
+    # training code path (compute_alpha158_frame + _factor_input) and merged
+    # onto both panels before scoring.  No lockbox statistic was observed
+    # before this amendment (the first invocation failed on the missing
+    # columns at load time).
+    custom_needed = [f for f in features if f in set(CUSTOM_FEATURES)]
+    panel_native = [f for f in features if f not in set(CUSTOM_FEATURES)]
+    columns = ["signal_date", "code", "universe_member", TARGET, *panel_native]
     lockbox = pd.read_parquet(paths["lockbox_panel.parquet"], columns=columns)
     lockbox["signal_date"] = pd.to_datetime(lockbox["signal_date"])
     if (lockbox["signal_date"] < pd.Timestamp(LOCKBOX_START)).any():
         raise DataContractError("lockbox panel contains development rows")
-    lockbox = validate_pit_panel(lockbox, QLIB_ALPHA158_FEATURES)
+    lockbox = validate_pit_panel(lockbox, [f for f in QLIB_ALPHA158_FEATURES if f in lockbox.columns])
+
+    root_dir = root
+    stocks_dir = root_dir / "stocks"
+    market = pd.read_parquet(root_dir / "market_sh000300.parquet")
+    frames = []
+    for index, code in enumerate(sorted(lockbox["code"].unique())):
+        kline = pd.read_parquet(stocks_dir / f"{code}.parquet")
+        factors = compute_alpha158_frame(_factor_input(kline, code), market)
+        keep = factors[["trade_date", *custom_needed]].copy()
+        keep["trade_date"] = pd.to_datetime(keep["trade_date"])
+        keep["code"] = code
+        keep[custom_needed] = keep[custom_needed].astype(np.float32)
+        frames.append(keep)
+        if (index + 1) % 100 == 0:
+            print(f"custom factors {index + 1}", flush=True)
+    custom = pd.concat(frames, ignore_index=True)
+
+    def merge_custom(panel: pd.DataFrame) -> pd.DataFrame:
+        out = panel.merge(
+            custom, left_on=["signal_date", "code"], right_on=["trade_date", "code"],
+            how="left", validate="one_to_one",
+        ).drop(columns="trade_date")
+        return out
+
+    lockbox = merge_custom(lockbox)
 
     scored = _normalized_scores(lockbox, features, booster)
     labeled = scored[scored["universe_member"] & scored[TARGET].notna() & scored["score"].notna()]
@@ -166,9 +204,10 @@ def main() -> None:
     bad_tail_lift = float(bad_tail_bottom / bad_tail_base) if bad_tail_base > 0 else None
 
     # Secondary (report-only): drift of the score distribution vs development.
-    dev_columns = ["signal_date", "code", "universe_member", TARGET, *features]
+    dev_columns = ["signal_date", "code", "universe_member", TARGET, *panel_native]
     development = pd.read_parquet(paths["development_panel.parquet"], columns=dev_columns)
     development["signal_date"] = pd.to_datetime(development["signal_date"])
+    development = merge_custom(development)
     dev_scored = _normalized_scores(development, features, booster)
     psi = _psi(
         dev_scored.loc[dev_scored["universe_member"], "score"].dropna().to_numpy(),
@@ -187,6 +226,12 @@ def main() -> None:
     report = {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "criteria_document": "docs/lockbox_go_no_go_v1.md",
+        "procedure_amendment": (
+            "split panels lack the 23 custom deploy features; recomputed "
+            "in-memory with the training code path before scoring. First "
+            "invocation failed at load time; no lockbox statistic was "
+            "observed before the amendment."
+        ),
         "artifact_sha256_receipts": receipts,
         "candidate": "lgbm_v2_risk",
         "lockbox_rows": int(len(lockbox)),
