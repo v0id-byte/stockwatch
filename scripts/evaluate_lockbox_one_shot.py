@@ -31,7 +31,7 @@ sys.path.insert(0, str(ROOT))
 
 from analysis.alpha158 import QLIB_ALPHA158_FEATURES  # noqa: E402
 from analysis.factors import compute_alpha158_frame  # noqa: E402
-from analysis.oos_baselines import DataContractError, validate_pit_panel  # noqa: E402
+from analysis.oos_baselines import COMMON_COLUMNS, DataContractError, validate_pit_panel  # noqa: E402
 from scripts.build_training_panel_v2 import CUSTOM_FEATURES  # noqa: E402
 from scripts.build_training_set import _factor_input  # noqa: E402
 from scripts.split_development_lockbox import LOCKBOX_START  # noqa: E402
@@ -151,7 +151,7 @@ def main() -> None:
     # columns at load time).
     custom_needed = [f for f in features if f in set(CUSTOM_FEATURES)]
     panel_native = [f for f in features if f not in set(CUSTOM_FEATURES)]
-    columns = ["signal_date", "code", "universe_member", TARGET, *panel_native]
+    columns = [*COMMON_COLUMNS, TARGET, *panel_native]
     lockbox = pd.read_parquet(paths["lockbox_panel.parquet"], columns=columns)
     lockbox["signal_date"] = pd.to_datetime(lockbox["signal_date"])
     if (lockbox["signal_date"] < pd.Timestamp(LOCKBOX_START)).any():
@@ -204,7 +204,7 @@ def main() -> None:
     bad_tail_lift = float(bad_tail_bottom / bad_tail_base) if bad_tail_base > 0 else None
 
     # Secondary (report-only): drift of the score distribution vs development.
-    dev_columns = ["signal_date", "code", "universe_member", TARGET, *panel_native]
+    dev_columns = [*COMMON_COLUMNS, TARGET, *panel_native]
     development = pd.read_parquet(paths["development_panel.parquet"], columns=dev_columns)
     development["signal_date"] = pd.to_datetime(development["signal_date"])
     development = merge_custom(development)
