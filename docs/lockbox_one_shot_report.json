@@ -1,0 +1,79 @@
+{
+  "generated_at": "2026-08-30T15:21:10",
+  "criteria_document": "docs/lockbox_go_no_go_v1.md",
+  "procedure_amendment": "split panels lack the 23 custom deploy features; recomputed in-memory with the training code path before scoring. First invocation failed at load time; no lockbox statistic was observed before the amendment.",
+  "artifact_sha256_receipts": {
+    "lockbox_panel.parquet": "6828a07fd86a4f186ab1eb2686f762f5f02e03d510e97553e6779b4b0a16918a",
+    "development_panel.parquet": "631afc81122f73ecdb764cefa8990d9c58b0ae0aad968a164ab8b6207c58404d",
+    "training_panel_v2.parquet": "b9bbda1549d2e699f92bd0867741e7242f1a719270488fcce7e61d7f1b2ece72",
+    "models/lgbm_v2_risk.txt": "c2be0acc0bac38d55062aba404999a8c6af8b501c4e439871600366ff6a77a2e",
+    "models/lgbm_v2_risk_meta.json": "832ad2a940f8595f7279d6baf119b7e8f055f17d63ebe99db4ca2e5527ae262d"
+  },
+  "candidate": "lgbm_v2_risk",
+  "lockbox_rows": 45421,
+  "labeled_member_rows": 17500,
+  "labeled_days": 35,
+  "label_coverage_note": "labels need t+21 open; unlabeled tail is expected",
+  "primary": {
+    "mean_daily_spearman_ic": 0.5475802131533202,
+    "positive_ic_day_rate": 0.9714285714285714,
+    "worst_decile_enrichment": -0.1437171256910707,
+    "expected_drawdown_bottom_decile": -0.24074580396373454,
+    "expected_drawdown_universe": -0.09702867827266383
+  },
+  "go_conditions": {
+    "mean_ic_positive": true,
+    "positive_rate_at_least_060": true,
+    "worst_decile_enrichment_negative": true
+  },
+  "decision": "GO",
+  "secondary_report_only": {
+    "icir": 2.2588098675514208,
+    "bad_tail_lift": 2.928416485900217,
+    "bad_tail_precision_bottom_decile": 0.6942857142857143,
+    "bad_tail_base_rate": 0.2370857142857143,
+    "one_sided_t_p_value": 2.162181161341272e-15,
+    "block_bootstrap_ci95": [
+      0.4796467677717739,
+      0.7169556243316032
+    ],
+    "score_psi_vs_development": 0.002183689066038006,
+    "daily_ic_series": {
+      "2026-06-12": 0.027160957295692165,
+      "2026-06-15": 0.13090170760683043,
+      "2026-06-16": 0.2682751851007404,
+      "2026-06-17": 0.4209438277753111,
+      "2026-06-18": 0.5633587654350617,
+      "2026-06-22": 0.6055739742958971,
+      "2026-06-23": 0.6099649358597433,
+      "2026-06-24": 0.6811780207120828,
+      "2026-06-25": 0.689184068736275,
+      "2026-06-26": 0.688845094010498,
+      "2026-06-29": 0.6996936813586088,
+      "2026-06-30": 0.7638483587170629,
+      "2026-07-01": 0.7498036791205688,
+      "2026-07-02": 0.8029270044105217,
+      "2026-07-03": 0.7891517835467772,
+      "2026-07-06": 0.7856115584462336,
+      "2026-07-07": 0.7698908942721998,
+      "2026-07-08": 0.7479535970198063,
+      "2026-07-09": 0.7319215033471952,
+      "2026-07-10": 0.7632020138980165,
+      "2026-07-13": 0.7184084860520015,
+      "2026-07-14": 0.7399357252891714,
+      "2026-07-15": 0.6898715713831174,
+      "2026-07-16": 0.7067527799731868,
+      "2026-07-17": 0.566416918544794,
+      "2026-07-20": 0.340246681152645,
+      "2026-07-21": 0.5462282213507972,
+      "2026-07-22": 0.563128067663023,
+      "2026-07-23": 0.5309286484568815,
+      "2026-07-24": 0.388373648012309,
+      "2026-07-27": 0.4585228191413169,
+      "2026-07-28": 0.3687320951762348,
+      "2026-07-29": 0.30230455840948495,
+      "2026-07-30": 0.0188733440229792,
+      "2026-07-31": -0.06280671522686092
+    }
+  }
+}

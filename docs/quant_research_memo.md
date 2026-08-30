@@ -316,3 +316,26 @@ CSI500 universe 上**没有可利用信息**，模型把这些列当噪声吸收
 
 报告：`llm_ablation_report.json`。至此本轮全部预注册假设检验完毕：
 **收益 alpha（价量四变体 + 消息面三臂）全灭，唯一存活者 = 风险模型。**
+
+## LOCKBOX 一次性开箱（2026-08-30，判据冻结于 commit 30e61d8）
+
+**决定：GO**（三条判据全过）。评估对象 = 唯一在册候选 lgbm_v2_risk。
+
+- 有标签样本：35 个交易日（2026-06-12 → 2026-07-31），17,500 member 行
+- 主指标：mean 日截面 Spearman IC **0.548**（判据 >0）；正 IC 日占比 **97.1%**
+  （判据 ≥0.60）；worst-decile enrichment **−0.144**（判据 <0；bottom decile
+  期望回撤 −24.1% vs universe −9.7%）
+- 次级（只报告）：ICIR 2.26；bad-tail lift 2.93（precision 69.4% vs 基础率
+  23.7%）；单侧 t 检验 p≈2e-15；block bootstrap CI95 [0.48, 0.72]；
+  **score PSI vs development = 0.0022（无输入漂移）**；最差单日 IC −0.063
+- **诚实解读**：lockbox 窗口撞上一段深度下跌行情（universe 20 日期望回撤 −9.7%、
+  坏尾基础率 23.7%，约为开发期 8.2% 的三倍）——高截面离散度下风险排序天然更容易，
+  IC 0.548 是 regime 放大后的读数，**常态预期仍应锚定 retro 的 0.27 量级**。
+  方向证据非常强，但最终验收仍是 ≥3 个月 prospective paper-monitor。
+- 程序记录：前两次 `--unlock-lockbox` 调用均在数据加载阶段失败（切分面板缺 23 个
+  custom 特征列 → 就地用训练同款代码补算；列投影缺 PIT 契约列），**未观察到任何
+  lockbox 统计量**，修正均已单独 commit（96aeca2 及后续）。报告原样落盘
+  `lockbox_one_shot_report.json`。lockbox 自此视为已消耗。
+
+**按冻结动作表进入 Stage 8：RPi 部署风险模型**（scp 模型 + `.env` 只追加 +
+`main.py score` 夜间任务 + 重启三服务 + 验证），随后启动 prospective paper-monitor。

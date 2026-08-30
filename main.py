@@ -210,5 +210,15 @@ if __name__ == "__main__":
         from scripts.backtest_strategy import main as backtest_main
         raise SystemExit(backtest_main(sys.argv[2:]))
 
+    elif mode == "score":
+        import json
+        from core.runner import _setup_log
+        _setup_log()
+        from config import get_config
+        from core.model_scoring import run_nightly_scoring
+        from utils.storage import Storage
+        result = run_nightly_scoring(Storage(), get_config())
+        print(json.dumps(result, ensure_ascii=False, default=str))
+
     else:
         print(f"Unknown mode: {mode}")
