@@ -215,9 +215,13 @@ if __name__ == "__main__":
         from core.runner import _setup_log
         _setup_log()
         from config import get_config
-        from core.model_scoring import run_nightly_scoring
+        from core.model_scoring import push_risk_alerts, run_nightly_scoring
         from utils.storage import Storage
-        result = run_nightly_scoring(Storage(), get_config())
+        cfg = get_config()
+        storage = Storage()
+        result = run_nightly_scoring(storage, cfg)
+        if cfg.enable_risk_model:
+            result["risk_alerts"] = push_risk_alerts(storage, cfg)
         print(json.dumps(result, ensure_ascii=False, default=str))
 
     else:

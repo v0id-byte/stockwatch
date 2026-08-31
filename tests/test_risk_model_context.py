@@ -87,3 +87,39 @@ class TestModelScoresStorage:
         rows[0]["risk_score"] = 6.0
         storage.upsert_model_scores(rows[:1])
         assert storage.get_latest_model_scores(["000001"])["000001"]["risk_score"] == pytest.approx(6.0)
+
+
+def test_worst_decile_codes_and_alert_dedupe():
+    from core.model_scoring import _worst_decile_codes, push_risk_alerts
+
+    pool = {f"c{i:03d}": {"risk_score": float(i)} for i in range(100)}
+    worst = _worst_decile_codes(pool)
+    assert worst == {f"c{i:03d}" for i in range(10)}  # rank/99 <= 0.10 → ranks 0..9
+
+    class FakeStorage:
+        def __init__(self, days):
+            self.days = days
+
+        def get_model_score_dates(self, limit=2):
+            return list(self.days)[:limit]
+
+        def get_model_scores_for_date(self, trade_date):
+            return self.days[trade_date]
+
+    class FakeCfg:
+        watchlist = ["c001", "c050"]
+        notify_channel = "none"
+
+    prev = {f"c{i:03d}": {"risk_score": float(i)} for i in range(100)}
+    # today c001 stays in the worst decile (no alert), c050 crashes into it
+    today = dict(prev)
+    today["c050"] = {"risk_score": -1.0}
+    fake = FakeStorage({"2026-08-31": today, "2026-08-28": prev})
+    fake.days = dict(sorted(fake.days.items(), reverse=True))
+    result = push_risk_alerts(fake, FakeCfg())
+    assert result["alerts"] == 1  # only the newly-entered c050
+
+    # first-ever scoring day: everything risky on the watchlist alerts
+    fake_first = FakeStorage({"2026-08-31": today})
+    result = push_risk_alerts(fake_first, FakeCfg())
+    assert result["alerts"] == 2

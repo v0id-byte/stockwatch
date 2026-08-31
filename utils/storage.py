@@ -501,6 +501,23 @@ class Storage:
                 ).fetchall()
         return {row["code"]: dict(row) for row in rows}
 
+    def get_model_score_dates(self, limit: int = 2) -> list[str]:
+        """Most recent distinct scored trade dates, newest first."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT trade_date FROM model_scores ORDER BY trade_date DESC LIMIT ?",
+                [int(limit)],
+            ).fetchall()
+        return [row[0] for row in rows]
+
+    def get_model_scores_for_date(self, trade_date: str) -> dict[str, dict]:
+        """All scored rows of one trade date (full reference pool)."""
+        with self._conn() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM model_scores WHERE trade_date=?", [trade_date]).fetchall()
+        return {row["code"]: dict(row) for row in rows}
+
     def get_decisions_by_run(self, run_id: str) -> list[dict]:
         with self._conn() as conn:
             conn.row_factory = sqlite3.Row

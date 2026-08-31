@@ -226,3 +226,52 @@ def run_nightly_scoring(storage, cfg) -> dict:
     scored = sum(1 for row in rows if row["alpha_score"] is not None or row["risk_score"] is not None)
     logger.info(f"model scoring: {scored}/{len(rows)} scored for {rows[0]['trade_date']}")
     return {"trade_date": rows[0]["trade_date"], "universe": len(universe), "scored": scored}
+
+
+WORST_DECILE = 0.10
+
+
+def _worst_decile_codes(rows: dict[str, dict]) -> set[str]:
+    """Codes in the riskiest decile of the pool (lowest risk_score = riskiest)."""
+    valid = {code: row["risk_score"] for code, row in rows.items()
+             if row.get("risk_score") is not None}
+    if len(valid) <= 1:
+        return set()
+    ordered = sorted(valid.items(), key=lambda item: item[1])
+    denom = max(1, len(ordered) - 1)
+    return {code for rank, (code, _s) in enumerate(ordered) if rank / denom <= WORST_DECILE}
+
+
+def push_risk_alerts(storage, cfg) -> dict:
+    """Warn on watchlist stocks ENTERING the pool's riskiest decile.
+
+    Deduped against the previous scored date so a stock that stays risky
+    does not alert every evening ("宁可漏，不要烦").
+    """
+    dates = storage.get_model_score_dates(limit=2)
+    if not dates:
+        return {"alerts": 0, "reason": "no scores"}
+    latest_rows = storage.get_model_scores_for_date(dates[0])
+    worst_now = _worst_decile_codes(latest_rows)
+    worst_prev = (
+        _worst_decile_codes(storage.get_model_scores_for_date(dates[1]))
+        if len(dates) > 1 else set()
+    )
+    watch = [c for c in cfg.watchlist if c in worst_now and c not in worst_prev]
+    if not watch:
+        return {"alerts": 0, "trade_date": dates[0]}
+    if cfg.notify_channel != "feishu":
+        return {"alerts": len(watch), "trade_date": dates[0], "sent": False}
+
+    from analysis.lgbm import format_risk_context
+    from push.feishu import FeishuClient, render_text_card
+
+    pool = {code: row.get("risk_score") for code, row in latest_rows.items()}
+    contexts = format_risk_context(pool)
+    lines = [f"【{code}】{contexts.get(code, '')}" for code in watch]
+    lines.append("")
+    lines.append(f"依据 {dates[0]} 收盘后全池回撤风险打分；预警 = 新进入全池最高风险 10% 分位。")
+    card = render_text_card("⚠️ 回撤风险预警", lines, template="red")
+    sent = FeishuClient().send_message(card)
+    logger.info(f"risk alerts: {watch} sent={sent}")
+    return {"alerts": len(watch), "codes": watch, "trade_date": dates[0], "sent": bool(sent)}
