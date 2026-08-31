@@ -350,3 +350,26 @@ GO 后尝试部署：deploy Pi（v0id@mc.void1211.com:22）**整机疑似离线*
 `models/lgbm_v2_risk.txt` + `_meta.json` 至 `~/.stockwatch/models/` → `.env`
 追加 `ENABLE_RISK_MODEL=true` → 配置每日收盘后 `python main.py score` 任务 →
 重启三服务 → 首晚验证 model_scores 落库 500/500。
+
+## Stage 8 部署完成（2026-09-01 凌晨，目标机变更为 pianotuner 主机）
+
+原 deploy Pi 整机离线，经用户决定改部署至 **rpi@mc.void1211.com:1211**（Debian 13,
+8GB RAM，与 pianotuner 共机）。过程与结果：
+
+- 代码：GitHub 直连被墙 → **git bundle + scp** 落地 `~/stockwatch`（origin 仍指
+  GitHub，后续增量可 bundle 续传）；venv 阿里云源装依赖。
+- 工件：`lgbm_v2_risk.txt`（sha 前缀 c2be0acc 与 lockbox pin 一致）+ meta →
+  `~/.stockwatch/models/`；`.env` 自 Mac 拷贝后**追加** `ENABLE_LGBM=false`
+  （alpha 未过 gate 不上线）、`ENABLE_RISK_MODEL=true`、新生成 `WEB_AUTH_TOKEN`。
+- 服务：`stockwatch` / `stockwatch-dashboard`(127.0.0.1:8765, 303 鉴权跳转 OK) /
+  `stockwatch-bot`(飞书 wss 已连) / `stockwatch-score.timer`(Mon–Fri 18:30 CST,
+  Persistent) 四单元全部 enable+active。
+- 首跑踩坑：EastMoney 从该主机连接被重置 + **baostock 不在 requirements.txt**
+  导致基准回退静默失败（fail-closed 正确拦截）→ baostock 入依赖清单（407c005）。
+- **首次生产打分成功：500/500 落库 trade_date=2026-08-31**（risk 500 / alpha 0，
+  版本 lgbm_v2_risk:2026-08-29T08:16:55Z），耗时 ~7 分钟 CPU。
+- **新功能——回撤风险预警推送**（b7a0a33，应用户要求）：夜间打分后，自选股
+  **新进入**全池最高风险 10% 分位即发飞书红卡预警；对前一交易日去重，持续处于
+  风险区不重复打扰（宁可漏不要烦）。首晚 alerts=0（无新进）。
+- **Prospective paper-monitor 自此起算**（≥3 个月）：线上分数事后真实 IC 与
+  bottom-decile 回撤 enrichment 为预注册指标；`scripts/paper_monitor_report.py` 待写。
