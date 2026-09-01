@@ -373,3 +373,12 @@ GO 后尝试部署：deploy Pi（v0id@mc.void1211.com:22）**整机疑似离线*
   风险区不重复打扰（宁可漏不要烦）。首晚 alerts=0（无新进）。
 - **Prospective paper-monitor 自此起算**（≥3 个月）：线上分数事后真实 IC 与
   bottom-decile 回撤 enrichment 为预注册指标；`scripts/paper_monitor_report.py` 待写。
+
+### Paper-monitor 就位（2026-09-01）
+
+`scripts/paper_monitor_report.py`（3cb0169）：按 meta 冻结口径复算真实
+`min(close[t+1..t+20])/open[t+1]-1`（个股自身成交 bar 序，entry 滞后 >5 日历日的
+停牌行剔除并计数），预注册门 = **≥63 个可评估日 ∧ mean IC>0 ∧ enrichment<0**，
+不足一律 ACCUMULATING 不许早判。Pi 上每周日 10:00 定时器（stockwatch-monitor.timer）
+自动出报告至 `~/.stockwatch/paper_monitor_report.json`；首个可评估日约 2026-09-30，
+63 日凑齐约 2026-12 月初。
