@@ -5,5 +5,8 @@ __pycache__
 db.sqlite
 .env
 models/
+packaging/runtime-models/
+build/
+dist/
 reports/
 .codegraph/

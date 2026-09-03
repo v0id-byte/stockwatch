@@ -7,6 +7,7 @@ from loguru import logger
 import akshare as ak
 
 from utils.health import record_source_health
+from core.clock import market_naive_now
 
 
 class NewsData:
@@ -18,7 +19,7 @@ class NewsData:
     def get_news(code: str, days: int = 7) -> list[dict]:
         """获取近 days 天个股新闻"""
         results = []
-        cutoff = datetime.now() - timedelta(days=days)
+        cutoff = market_naive_now() - timedelta(days=days)
         started = time.perf_counter()
         try:
             df = ak.stock_news_em(symbol=code)
@@ -26,7 +27,7 @@ class NewsData:
                 try:
                     dt = datetime.strptime(str(row.get("发布时间", "")), "%Y-%m-%d %H:%M:%S")
                 except Exception:
-                    dt = datetime.now()
+                    dt = market_naive_now()
                 if dt < cutoff:
                     continue
                 results.append({
@@ -91,4 +92,4 @@ class NewsData:
         try:
             return datetime.fromisoformat(text)
         except Exception:
-            return datetime.now()
+            return market_naive_now()

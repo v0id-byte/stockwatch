@@ -1,0 +1,100 @@
+name: Desktop preview builds
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt -r requirements-dev.txt
+      - run: python -m pytest -q
+
+  stage-models:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download inference model bundle
+        env:
+          MODEL_BUNDLE_URL: ${{ secrets.STOCKWATCH_MODEL_BUNDLE_URL }}
+        run: |
+          mkdir -p .model-source
+          if [[ -n "$MODEL_BUNDLE_URL" ]]; then
+            curl --fail --location --retry 3 "$MODEL_BUNDLE_URL" -o /tmp/stockwatch-models.zip
+            unzip -q /tmp/stockwatch-models.zip -d .model-source
+          elif [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            echo "Tagged releases require STOCKWATCH_MODEL_BUNDLE_URL" >&2
+            exit 1
+          fi
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            python packaging/prepare_models.py .model-source --require-risk
+          else
+            python packaging/prepare_models.py .model-source
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: inference-models
+          path: packaging/runtime-models
+          if-no-files-found: error
+
+  build:
+    needs: [test, stage-models]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            artifact: StockWatch-macOS-arm64
+            platform: macos
+          - runner: macos-15-intel
+            artifact: StockWatch-macOS-x64
+            platform: macos
+          - runner: windows-latest
+            artifact: StockWatch-Windows-x64
+            platform: windows
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: actions/download-artifact@v4
+        with:
+          name: inference-models
+          path: packaging/runtime-models
+      - name: Install build dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -r requirements-desktop.txt
+      - name: Build application
+        run: python -m PyInstaller --noconfirm --clean packaging/stockwatch-desktop.spec
+      - name: Embed macOS login agent
+        if: matrix.platform == 'macos'
+        run: |
+          mkdir -p dist/StockWatch.app/Contents/Library/LaunchAgents
+          cp dist/StockWatch.app/Contents/MacOS/StockWatch dist/StockWatch.app/Contents/MacOS/StockWatchAgent
+          cp packaging/macos/com.melspectrum.stockwatch.agent.plist dist/StockWatch.app/Contents/Library/LaunchAgents/
+          plutil -lint dist/StockWatch.app/Contents/Library/LaunchAgents/com.melspectrum.stockwatch.agent.plist
+      - name: Archive macOS application
+        if: matrix.platform == 'macos'
+        run: ditto -c -k --sequesterRsrc --keepParent dist/StockWatch.app "dist/${{ matrix.artifact }}.zip"
+      - name: Archive Windows application
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: Compress-Archive -Path dist/StockWatch -DestinationPath "dist/${{ matrix.artifact }}.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}.zip
+          if-no-files-found: error

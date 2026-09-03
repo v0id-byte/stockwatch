@@ -12,10 +12,11 @@ from push.feishu import FeishuClient, render_text_card
 from utils.storage import Storage
 from utils.health import record_source_health
 from analysis.sentiment import SENTIMENT_SCORE_MODEL_VERSION, score_news_items
+from core.clock import market_now
 
 
 def _is_intraday_monitor_time(now: datetime | None = None) -> bool:
-    now = now or datetime.now()
+    now = market_now(now)
     if now.weekday() >= 5:
         return False
     minutes = now.hour * 60 + now.minute
@@ -74,7 +75,7 @@ def _monitor_price_alerts(storage: Storage, market: MarketData, feishu: FeishuCl
         "行情", bool(quotes), (time.perf_counter() - _t_quote) * 1000,
         None if quotes else "未获取到任何实时报价", len(quotes),
     )
-    today = datetime.now().date().isoformat()
+    today = market_now().date().isoformat()
 
     for alert in alerts:
         if str(alert.get("last_notified_at") or "").startswith(today):

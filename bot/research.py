@@ -17,6 +17,7 @@ import akshare as ak
 
 from analysis.technical import compute_tech_score
 from config import get_config
+from core.clock import market_naive_now
 from data.market import MarketData
 from data.news import NewsData
 from utils.llm import get_llm_client
@@ -107,7 +108,7 @@ def _market_secid(code: str) -> str:
 
 
 def _date_yyyymmdd(days_ago: int = 0) -> str:
-    return (datetime.now() - timedelta(days=days_ago)).strftime("%Y%m%d")
+    return (market_naive_now() - timedelta(days=days_ago)).strftime("%Y%m%d")
 
 
 @lru_cache(maxsize=1)
@@ -354,7 +355,7 @@ def _ensure_kline(code: str, market: MarketData, storage: Storage) -> list[dict]
     if not storage.kline_cached_today(code):
         for row in market.get_daily_kline(code):
             storage.upsert_kline(code, row["trade_date"], row)
-    return storage.get_kline(code, "2020-01-01", datetime.now().strftime("%Y-%m-%d"))
+    return storage.get_kline(code, "2020-01-01", market_naive_now().strftime("%Y-%m-%d"))
 
 
 def _pct(value: float) -> str:
@@ -501,7 +502,7 @@ def build_market_snapshot(
             logger.debug(f"大盘 regime 快照失败: {e}")
 
     return {
-        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "generated_at": market_naive_now().strftime("%Y-%m-%d %H:%M"),
         "indexes": indexes,
         "north_money_top": north,
         "telegraph": telegraph,

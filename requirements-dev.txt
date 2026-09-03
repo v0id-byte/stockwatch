@@ -1,2 +1,7 @@
 # 开发 / 测试依赖（运行 pytest 测试套件所需）
 pytest>=8.0.0
+# Research-suite imports used during test collection. These are development
+# dependencies only; desktop packaging explicitly excludes the training stack.
+pyarrow>=14.0.0
+scikit-learn>=1.4.0
+lightgbm>=4.3.0

@@ -1,6 +1,8 @@
-"""CLI 入口：test / once / daemon / monitor / bot / demo / dashboard / report"""
+"""CLI 入口：test / once / agent / daemon / monitor / bot / demo / dashboard / report"""
 import sys
 import os
+
+from core.clock import market_today
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -28,7 +30,7 @@ def test():
         )
         if quotes:
             qt = str(quote.get("quote_time") or "")
-            stale = "" if qt[:8] == date.today().strftime("%Y%m%d") else "（非当日时间戳，可能非交易时段或数据延迟）"
+            stale = "" if qt[:8] == market_today().strftime("%Y%m%d") else "（非当日时间戳，可能非交易时段或数据延迟）"
             print(f"✅ 行情接口成功 → {name}（{latency:.0f}ms）{stale}")
         else:
             print("❌ 行情接口失败：未获取到报价")
@@ -164,7 +166,7 @@ def demo(query: str = ""):
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python main.py [test|once|daemon|monitor|bot|demo|dashboard|report|backtest]")
+        print("Usage: python main.py [test|once|agent|daemon|monitor|bot|demo|dashboard|report|backtest]")
         sys.exit(1)
 
     mode = sys.argv[1]
@@ -179,6 +181,16 @@ if __name__ == "__main__":
     elif mode == "daemon":
         from core.scheduler import daemon
         daemon()
+
+    elif mode == "agent":
+        import argparse
+        from core.agent import run_agent
+
+        parser = argparse.ArgumentParser(description="Run the StockWatch background agent")
+        parser.add_argument("--host", default="127.0.0.1")
+        parser.add_argument("--port", type=int, default=8765)
+        args = parser.parse_args(sys.argv[2:])
+        run_agent(args.host, args.port)
 
     elif mode == "monitor":
         from core.runner import _setup_log

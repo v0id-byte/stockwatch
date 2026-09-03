@@ -8,6 +8,8 @@ import akshare as ak
 from loguru import logger
 
 from config import get_config
+from core.clock import market_today
+from core.settings import stockwatch_home
 from data.market import MarketData
 
 # 节假日兜底表（仅在 AKShare 接口与本地缓存均不可用时使用）。
@@ -35,8 +37,11 @@ _HOLIDAYS_FALLBACK = {
     "2027-10-05", "2027-10-06", "2027-10-07",
 }
 
-_TRADE_DATES_CACHE = Path.home() / ".stockwatch" / "trade_dates_cache.json"
 _CACHE_TTL_DAYS = 30
+
+
+def _trade_dates_cache() -> Path:
+    return stockwatch_home() / "trade_dates_cache.json"
 
 
 def _normalize_code(raw) -> str:
@@ -47,13 +52,14 @@ def _normalize_code(raw) -> str:
 def _load_trade_dates_cache() -> set[str]:
     """从本地文件加载缓存的交易日列表。"""
     try:
-        if _TRADE_DATES_CACHE.exists():
-            data = json.loads(_TRADE_DATES_CACHE.read_text())
+        cache_path = _trade_dates_cache()
+        if cache_path.exists():
+            data = json.loads(cache_path.read_text())
             cached_at_str = data.get("cached_at", "")
             if not cached_at_str:
                 return set()
             cached_at = date.fromisoformat(cached_at_str)
-            today = date.today()
+            today = market_today()
             if (today - cached_at).days < _CACHE_TTL_DAYS:
                 dates = set(data.get("dates", []))
                 if dates and max(dates) >= today.isoformat():
@@ -65,12 +71,13 @@ def _load_trade_dates_cache() -> set[str]:
 
 def _save_trade_dates_cache(dates: set[str]):
     try:
-        _TRADE_DATES_CACHE.parent.mkdir(parents=True, exist_ok=True)
-        _TRADE_DATES_CACHE.write_text(json.dumps({
-            "cached_at": date.today().isoformat(),
+        cache_path = _trade_dates_cache()
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(json.dumps({
+            "cached_at": market_today().isoformat(),
             "dates": sorted(dates),
         }))
-        logger.debug(f"交易日历已缓存 {len(dates)} 条 → {_TRADE_DATES_CACHE}")
+        logger.debug(f"交易日历已缓存 {len(dates)} 条 → {cache_path}")
     except Exception as e:
         logger.debug(f"交易日历缓存写入失败: {e}")
 
@@ -83,7 +90,7 @@ class Universe:
 
     def is_trading_day(self) -> bool:
         """判断今天是否交易日（AKShare 主源 → 本地缓存 → 节假日兜底表）。"""
-        today = date.today()
+        today = market_today()
         if today.weekday() >= 5:  # 周六周日
             return False
         today_str = today.isoformat()
@@ -115,7 +122,7 @@ class Universe:
             return []
 
         watchlist = self.cfg.watchlist
-        today_str = date.today().isoformat()
+        today_str = market_today().isoformat()
         cache_key = f"hot_pool_{today_str}"
 
         hot_codes = self._get_cached_pool(cache_key)
@@ -134,7 +141,7 @@ class Universe:
     def _build_hot_pool(self) -> list[str]:
         """动态生成热门拓展池（龙虎榜 + 板块涨幅龙头 + 北向净买入）。"""
         hot = []
-        today_str = date.today().strftime("%Y%m%d")
+        today_str = market_today().strftime("%Y%m%d")
 
         try:
             df = ak.stock_lhb_detail_em(start_date=today_str, end_date=today_str)

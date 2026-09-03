@@ -18,12 +18,14 @@ from urllib.parse import parse_qs, quote, urlparse
 
 from analysis.report import build_report
 from config import get_config
+from core.clock import market_naive_now, market_today
+from core.settings import FileSettingsStore, settings_path, stockwatch_home
 from utils.storage import Storage
 
 
 PROJECT_DIR = Path(__file__).resolve().parent
-ENV_PATH = Path(os.getenv("STOCKWATCH_ENV_PATH", PROJECT_DIR / ".env")).expanduser()
-CUSTOM_FACTORS_DIR = Path.home() / ".stockwatch" / "custom_factors"
+ENV_PATH = settings_path(PROJECT_DIR)  # compatibility for code importing this name
+CUSTOM_FACTORS_DIR = stockwatch_home() / "custom_factors"
 _ENV_ASSIGN_RE = re.compile(r"^(\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*=\s*)(.*?)(\r?\n)?$")
 WEB_USER_ID = "web-ui"
 WEB_CHAT_ID = "web-ui"
@@ -49,6 +51,9 @@ DEFAULT_SETTINGS = {
     "ENABLE_CALIBRATION": "false",
     "ENABLE_ALPHA158": "false",
     "ENABLE_LGBM": "false",
+    "ENABLE_RISK_MODEL": "false",
+    "RISK_MODEL_PATH": "",
+    "STOCKWATCH_AGENT_ENABLE_BOT": "false",
     "MARKET_REGIME": "auto",
     "ENABLE_PROPAGATION": "false",
     "ENABLE_EVENTS": "false",
@@ -176,20 +181,7 @@ def _read_env_values() -> dict[str, str]:
 
 
 def load_settings() -> dict[str, str]:
-    values = dict(DEFAULT_SETTINGS)
-    for key in values:
-        if os.getenv(key) is not None:
-            values[key] = os.getenv(key, "")
-    env_values = _read_env_values()
-    for key in values:
-        if key in env_values:
-            values[key] = env_values[key]
-    if not values["LLM_API_KEY"]:
-        if values["LLM_PROVIDER"] == "anthropic":
-            values["LLM_API_KEY"] = env_values.get("ANTHROPIC_API_KEY", os.getenv("ANTHROPIC_API_KEY", ""))
-        else:
-            values["LLM_API_KEY"] = env_values.get("MINIMAX_API_KEY", os.getenv("MINIMAX_API_KEY", ""))
-    return values
+    return FileSettingsStore(DEFAULT_SETTINGS, PROJECT_DIR).load()
 
 
 def _web_auth_token() -> str:
@@ -233,35 +225,7 @@ def _serialize_env_value(value: str) -> str:
 
 
 def save_settings(updates: dict[str, str]) -> None:
-    allowed = set(DEFAULT_SETTINGS)
-    cleaned = {key: str(value).strip() for key, value in updates.items() if key in allowed}
-    if not cleaned:
-        return
-    lines = ENV_PATH.read_text(encoding="utf-8").splitlines(keepends=True) if ENV_PATH.exists() else []
-    written: set[str] = set()
-    next_lines: list[str] = []
-    for line in lines:
-        match = _ENV_ASSIGN_RE.match(line)
-        if match and match.group(2) in cleaned:
-            key = match.group(2)
-            newline = match.group(5) or "\n"
-            next_lines.append(f"{key}={_serialize_env_value(cleaned[key])}{newline}")
-            written.add(key)
-        else:
-            next_lines.append(line)
-    missing = [key for key in cleaned if key not in written]
-    if missing:
-        if next_lines and not next_lines[-1].endswith(("\n", "\r\n")):
-            next_lines[-1] += "\n"
-        if next_lines:
-            next_lines.append("\n")
-        next_lines.append("# ===== Web UI settings =====\n")
-        for key in missing:
-            next_lines.append(f"{key}={_serialize_env_value(cleaned[key])}\n")
-    ENV_PATH.parent.mkdir(parents=True, exist_ok=True)
-    ENV_PATH.write_text("".join(next_lines), encoding="utf-8")
-    for key, value in cleaned.items():
-        os.environ[key] = value
+    FileSettingsStore(DEFAULT_SETTINGS, PROJECT_DIR).save(updates)
 
 
 def _safe_filename(raw: str, fallback: str = "factor.py") -> str:
@@ -554,7 +518,7 @@ def _risk_plan_result(params: dict[str, list[str]], storage: Storage) -> dict:
                 storage.upsert_kline(code, row["trade_date"], row)
     except Exception:
         pass
-    kline = storage.get_kline(code, "2020-01-01", datetime.now().strftime("%Y-%m-%d"))[-60:]
+    kline = storage.get_kline(code, "2020-01-01", market_today().isoformat())[-60:]
 
     current_price = _row_float(quote, "close")
     if current_price <= 0 and kline:
@@ -798,7 +762,7 @@ def load_dashboard_data(storage: Storage) -> dict:
         """)
     report = build_report(storage, horizon=5, limit=500)
     return {
-        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "generated_at": market_naive_now().strftime("%Y-%m-%d %H:%M:%S"),
         "runs": runs,
         "decisions": decisions,
         "positions": positions,
@@ -2690,7 +2654,21 @@ def _record_feedback(params: dict[str, list[str]], storage: Storage) -> str:
     return "反馈已记录，会用于后续提醒质量复盘。"
 
 
-def make_handler(storage: Storage):
+_SECRET_SETTINGS = {
+    "LLM_API_KEY", "FEISHU_APP_SECRET", "FEISHU_VERIFICATION_TOKEN",
+    "FEISHU_ENCRYPT_KEY", "WEB_AUTH_TOKEN",
+}
+
+
+def _desktop_settings_payload() -> dict[str, object]:
+    settings = load_settings()
+    return {
+        key: ({"configured": bool(value)} if key in _SECRET_SETTINGS else value)
+        for key, value in settings.items()
+    }
+
+
+def make_handler(storage: Storage, agent_controller=None):
     class Handler(BaseHTTPRequestHandler):
         def _send_bytes(self, body: bytes, content_type: str, status: int = 200, headers: dict[str, str] | None = None):
             self.send_response(status)
@@ -2753,6 +2731,8 @@ def make_handler(storage: Storage):
                 "/",
                 "/console",
                 "/api.json",
+                "/api/v1/status",
+                "/api/v1/settings",
                 "/settings/watchlist",
                 "/settings/model",
                 "/settings/channels",
@@ -2765,7 +2745,18 @@ def make_handler(storage: Storage):
                 return
             if not self._require_auth(parsed):
                 return
-            if route == "/api.json":
+            if route == "/api/v1/status":
+                data = agent_controller.status() if agent_controller else {
+                    "ok": True,
+                    "mode": "dashboard-only",
+                    "scheduled_jobs": storage.get_recent_scheduled_jobs(10),
+                }
+                body = json.dumps(data, ensure_ascii=False, default=str).encode("utf-8")
+                content_type = "application/json; charset=utf-8"
+            elif route == "/api/v1/settings":
+                body = json.dumps(_desktop_settings_payload(), ensure_ascii=False).encode("utf-8")
+                content_type = "application/json; charset=utf-8"
+            elif route == "/api.json":
                 data = load_dashboard_data(storage)
                 body = json.dumps(data, ensure_ascii=False, default=str).encode("utf-8")
                 content_type = "application/json; charset=utf-8"
@@ -2798,6 +2789,8 @@ def make_handler(storage: Storage):
                 return
             if route not in {
                 "/api/console",
+                "/api/v1/settings",
+                "/api/v1/run",
                 "/console",
                 "/feedback",
                 "/settings/watchlist",
@@ -2816,6 +2809,30 @@ def make_handler(storage: Storage):
                 return
             length = int(self.headers.get("Content-Length") or "0")
             raw = self.rfile.read(length)
+            if route == "/api/v1/settings":
+                try:
+                    payload = json.loads(raw.decode("utf-8") or "{}")
+                    if not isinstance(payload, dict):
+                        raise ValueError("JSON body must be an object")
+                    save_settings(payload)
+                    body = json.dumps({"ok": True, "settings": _desktop_settings_payload()}, ensure_ascii=False).encode("utf-8")
+                    self._send_bytes(body, "application/json; charset=utf-8")
+                except (ValueError, json.JSONDecodeError) as exc:
+                    self._send_bytes(json.dumps({"ok": False, "error": str(exc)}).encode("utf-8"), "application/json; charset=utf-8", 400)
+                return
+            if route == "/api/v1/run":
+                if agent_controller is None:
+                    self._send_bytes(b'{"ok":false,"error":"agent unavailable"}', "application/json; charset=utf-8", 503)
+                    return
+                try:
+                    payload = json.loads(raw.decode("utf-8") or "{}")
+                    action = str(payload.get("action") or "full")
+                    accepted = agent_controller.submit(action)
+                    body = json.dumps({"ok": accepted, "action": action}).encode("utf-8")
+                    self._send_bytes(body, "application/json; charset=utf-8", 202 if accepted else 400)
+                except (ValueError, json.JSONDecodeError) as exc:
+                    self._send_bytes(json.dumps({"ok": False, "error": str(exc)}).encode("utf-8"), "application/json; charset=utf-8", 400)
+                return
             params, files = _parse_form_data(self.headers, raw)
             if route == "/feedback":
                 try:
@@ -2873,10 +2890,14 @@ def make_handler(storage: Storage):
     return Handler
 
 
-def run_dashboard(host: str = "127.0.0.1", port: int = 8765):
+def create_dashboard_server(host: str = "127.0.0.1", port: int = 8765, *, agent_controller=None):
     os.environ.setdefault("STOCKWATCH_SKIP_REQUIRED_CONFIG", "1")
     storage = Storage()
-    server = ThreadingHTTPServer((host, port), make_handler(storage))
+    return ThreadingHTTPServer((host, port), make_handler(storage, agent_controller))
+
+
+def run_dashboard(host: str = "127.0.0.1", port: int = 8765):
+    server = create_dashboard_server(host, port)
     print(f"StockWatch dashboard: http://{host}:{port}")
     if host in {"0.0.0.0", "::"} and not _web_auth_token():
         print("WARNING: dashboard is listening on all interfaces without WEB_AUTH_TOKEN.")

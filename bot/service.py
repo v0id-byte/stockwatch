@@ -19,6 +19,7 @@ from bot.research import (
     resolve_stock,
 )
 from config import get_config
+from core.clock import market_naive_now
 from data.market import MarketData
 from decision.engine import DecisionEngine
 from push.feishu import render_single_decision_card, render_text_card
@@ -172,7 +173,7 @@ class BotService:
         if not self.storage.kline_cached_today(code):
             for row in self.market.get_daily_kline(code):
                 self.storage.upsert_kline(code, row["trade_date"], row)
-        kline = self.storage.get_kline(code, "2020-01-01", datetime.now().strftime("%Y-%m-%d"))
+        kline = self.storage.get_kline(code, "2020-01-01", market_naive_now().strftime("%Y-%m-%d"))
         if len(kline) < 20:
             raise RuntimeError(f"{code} K线不足，暂时无法分析")
 
@@ -197,8 +198,8 @@ class BotService:
             sector_context=sector_context,
             confidence_floor=0.0,
         )
-        run_id = "bot_" + datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6]
-        self.storage.insert_decision(run_id, datetime.now().isoformat(), decision)
+        run_id = "bot_" + market_naive_now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6]
+        self.storage.insert_decision(run_id, market_naive_now().isoformat(), decision)
         return decision, quote
 
     def _factor_contexts(self, code: str, kline: list[dict]) -> tuple[str, str]:

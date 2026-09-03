@@ -6,6 +6,7 @@ from pathlib import Path
 from loguru import logger
 
 from config import get_config
+from core.clock import market_naive_now
 
 
 class FeishuClient:
@@ -355,7 +356,7 @@ def render_card(run_id: str, decisions: list[dict], regime_info: dict | None = N
     add_signal_group("📌", "继续观察", hold_notes)
 
     # 卡片尾
-    run_time = datetime.now().strftime("%Y-%m-%d %H:%M")
+    run_time = market_naive_now().strftime("%Y-%m-%d %H:%M")
     elements.append({"tag": "hr"})
     elements.append({
         "tag": "div",
