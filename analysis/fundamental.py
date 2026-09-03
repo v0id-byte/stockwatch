@@ -11,12 +11,13 @@ from __future__ import annotations
 from datetime import date
 
 from loguru import logger
+from core.clock import market_today
 
 _CACHE: dict[str, dict[str, float]] = {}
 
 
 def _recent_quarter_ends(n: int) -> list[str]:
-    today = date.today()
+    today = market_today()
     ends = []
     for year in (today.year, today.year - 1):
         for md in ("1231", "0930", "0630", "0331"):
@@ -28,7 +29,7 @@ def _recent_quarter_ends(n: int) -> list[str]:
 
 def get_latest_ocf_to_eps(codes: list[str]) -> dict[str, float]:
     """Return {code: ocf_to_eps} for the latest report visible today. Cached per day."""
-    cache_key = date.today().isoformat()
+    cache_key = market_today().isoformat()
     if cache_key not in _CACHE:
         _CACHE.clear()
         _CACHE[cache_key] = _fetch()

@@ -28,6 +28,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from loguru import logger  # noqa: E402
+from core.clock import market_now, market_today  # noqa: E402
 
 HISTORY_DAYS = 560  # 250-day windows + warmup + holidays margin
 
@@ -58,7 +59,7 @@ def _download_history(codes: list[str], *, end: str | None = None) -> dict[str, 
 
     from scripts.bootstrap_history import _download_one
 
-    end = end or date.today().strftime("%Y%m%d")
+    end = end or market_today().strftime("%Y%m%d")
     start = (datetime.strptime(end, "%Y%m%d") - timedelta(days=int(HISTORY_DAYS * 1.6))).strftime("%Y%m%d")
     out: dict[str, pd.DataFrame] = {}
     for index, code in enumerate(codes):
@@ -79,7 +80,7 @@ def _download_benchmarks(end: str | None = None) -> tuple["pd.DataFrame", "pd.Da
     from scripts.bootstrap_history import _download_index_baostock
     from scripts.build_frozen_oos_panel import _load_benchmark
 
-    end = end or date.today().strftime("%Y%m%d")
+    end = end or market_today().strftime("%Y%m%d")
     start = (datetime.strptime(end, "%Y%m%d") - timedelta(days=int(HISTORY_DAYS * 1.6))).strftime("%Y%m%d")
     import tempfile
 
@@ -174,7 +175,7 @@ def score_trade_date(
             f"scoring coverage {len(features)}/{len(universe_snapshot)} below 90%; refusing to rank"
         )
     rows: list[dict] = []
-    scored_at = datetime.now().isoformat(timespec="seconds")
+    scored_at = market_now().isoformat(timespec="seconds")
     universe_sha = _universe_sha(universe_snapshot)
 
     def _apply(model_path: Path | None, kind: str) -> tuple[dict, str | None, str | None]:

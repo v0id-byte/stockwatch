@@ -16,6 +16,7 @@ from analysis.sentiment import SENTIMENT_SCORE_MODEL_VERSION, batch_sentiment_de
 from decision.engine import DecisionEngine
 from push.feishu import FeishuClient, render_card, render_text_card
 from utils.health import record_source_health
+from core.clock import market_now
 
 
 ALERT_LEVEL_LABELS = {
@@ -50,7 +51,7 @@ def _format_north_context(items: list[dict]) -> str:
 def _tracked_alert_reason(position: dict, decision: dict) -> str:
     if not position:
         return ""
-    today = datetime.now().date().isoformat()
+    today = market_now().date().isoformat()
     last_notified = str(position.get("last_notified_at") or "")
     if last_notified.startswith(today):
         return ""
@@ -80,14 +81,14 @@ def _decision_alert_level(decision: dict) -> str:
 
 
 def _is_after_close_summary_time(now: datetime | None = None) -> bool:
-    now = now or datetime.now()
+    now = market_now(now)
     if now.weekday() >= 5:
         return False
     return now.hour * 60 + now.minute >= 15 * 60
 
 
 def _after_close_summary_key(now: datetime | None = None) -> str:
-    now = now or datetime.now()
+    now = market_now(now)
     return f"after_close_summary:{now.date().isoformat()}"
 
 
@@ -138,7 +139,7 @@ def _send_after_close_summary(storage: Storage, feishu: FeishuClient,
 def once():
     """立即跑一次完整流程。"""
     _setup_log()
-    run_id = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6]
+    run_id = market_now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6]
     logger.info(f"===== 开始运行 {run_id} =====")
 
     cfg = get_config()
@@ -248,7 +249,7 @@ def once():
             logger.warning(f"指数K线获取失败，Alpha/LGBM 将使用空大盘上下文: {e}")
 
     # 3. 并行拉取 K 线（网络 I/O；写入串行保证 SQLite 安全）
-    today_str = datetime.now().strftime("%Y-%m-%d")
+    today_str = market_now().strftime("%Y-%m-%d")
     codes_to_fetch = [c for c in codes if not storage.kline_cached_today(c)]
     kline_ok = kline_fail = 0
     if codes_to_fetch:
@@ -451,7 +452,7 @@ def once():
         decision["alpha_model_version"] = score_row.get("alpha_model_version")
         decision["risk_model_version"] = score_row.get("risk_model_version")
         final_decisions.append(decision)
-        storage.insert_decision(run_id, datetime.now().isoformat(), decision)
+        storage.insert_decision(run_id, market_now().isoformat(), decision)
         llm_calls += 1
 
     # 7. 推送

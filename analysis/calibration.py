@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from loguru import logger
 
 from config import get_config
+from core.clock import market_naive_now
 from utils.storage import Storage
 
 
@@ -120,7 +121,7 @@ def resolve_decisions(storage: Storage, lookback_days: int) -> int:
     resolved = 0
     for decision in storage.get_unresolved_action_decisions():
         run_dt = _run_date(decision["run_ts"])
-        if datetime.now() < run_dt + timedelta(days=lookback_days):
+        if market_naive_now() < run_dt + timedelta(days=lookback_days):
             continue
         success = _resolve_one(storage, decision, lookback_days)
         if success is None:
@@ -134,7 +135,7 @@ def make_model_row(action: str, sample_size: int, coef: float, intercept: float,
                    auc: float | None, notes: str = "") -> dict:
     return {
         "action": action,
-        "trained_at": datetime.now().isoformat(),
+        "trained_at": market_naive_now().isoformat(),
         "sample_size": sample_size,
         "coef": coef,
         "intercept": intercept,

@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 from utils.storage import Storage
+from core.clock import market_naive_now
 
 
 def _date_part(value: str) -> str:
@@ -76,7 +77,7 @@ def build_report(storage: Storage, horizon: int = 5, limit: int = 1000) -> dict:
         """, [limit]).fetchall()
 
     samples = []
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = market_naive_now().strftime("%Y-%m-%d")
     for row in decisions:
         item = dict(row)
         kline = storage.get_kline(item["code"], "2020-01-01", today)
@@ -100,7 +101,7 @@ def build_report(storage: Storage, horizon: int = 5, limit: int = 1000) -> dict:
         by_bucket[row["confidence_bucket"]].append(row)
 
     return {
-        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "generated_at": market_naive_now().strftime("%Y-%m-%d %H:%M"),
         "horizon": horizon,
         "scanned_decisions": len(decisions),
         "resolved_samples": len(samples),

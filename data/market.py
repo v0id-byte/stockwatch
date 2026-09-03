@@ -3,6 +3,7 @@ import re
 import json
 import requests
 from loguru import logger
+from core.clock import market_today
 
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
@@ -169,9 +170,10 @@ class MarketData:
         """AKShare 备用 K 线（前复权）。"""
         try:
             import akshare as ak
-            from datetime import date, timedelta
-            end = date.today().isoformat().replace("-", "")
-            start = (date.today() - timedelta(days=limit * 2)).isoformat().replace("-", "")
+            from datetime import timedelta
+            today = market_today()
+            end = today.isoformat().replace("-", "")
+            start = (today - timedelta(days=limit * 2)).isoformat().replace("-", "")
             df = ak.stock_zh_a_hist(
                 symbol=code, period="daily", adjust="qfq",
                 start_date=start, end_date=end

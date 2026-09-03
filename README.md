@@ -66,6 +66,11 @@ StockWatch 的定位是**自选股盯盘提醒、公开信息聚合和持仓风�
 
 ## 快速开始
 
+> **桌面测试版正在建设中：** 仓库现在包含单进程 Agent、PySide6 托盘壳和
+> macOS arm64 / macOS x64 / Windows x64 的 Actions 预览构建。预览包尚未签名，
+> 暂不建议直接发给家人使用；构建与正式发行边界见
+> [`docs/desktop-packaging.md`](docs/desktop-packaging.md)。
+
 ### 0. 一键启动（推荐普通用户）
 
 不熟悉命令行？下载仓库后直接运行：

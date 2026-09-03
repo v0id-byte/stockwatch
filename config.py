@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Any
 from dotenv import load_dotenv
 
+from core.settings import settings_path, stockwatch_home
+
 
 def _env_bool(name: str, default: bool = False) -> bool:
     raw = os.getenv(name)
@@ -27,11 +29,9 @@ class Config:
     def load(self, env_path: str | None = None) -> "Config":
         if self._loaded:
             return self
-        configured_env_path = env_path or os.getenv("STOCKWATCH_ENV_PATH")
-        if configured_env_path:
+        configured_env_path = Path(env_path).expanduser() if env_path else settings_path(Path(__file__).resolve().parent)
+        if configured_env_path.exists():
             load_dotenv(configured_env_path, override=True)
-        else:
-            load_dotenv()
         self._loaded = True
         self._validate()
         return self
@@ -192,6 +192,10 @@ class Config:
             return value
         return "web"
 
+    @property
+    def agent_enable_bot(self) -> bool:
+        return _env_bool("STOCKWATCH_AGENT_ENABLE_BOT", False)
+
     # === 数据源 ===
     @property
     def tushare_token(self) -> str:
@@ -292,8 +296,8 @@ class Config:
 
     @property
     def lgbm_model_path(self) -> Path:
-        raw = os.getenv("LGBM_MODEL_PATH", "~/.stockwatch/models/lgbm.txt")
-        return Path(os.path.expanduser(raw))
+        raw = os.getenv("LGBM_MODEL_PATH", "").strip()
+        return Path(os.path.expanduser(raw)) if raw else self.home_dir / "models" / "lgbm.txt"
 
     @property
     def enable_risk_model(self) -> bool:
@@ -301,8 +305,8 @@ class Config:
 
     @property
     def risk_model_path(self) -> Path:
-        raw = os.getenv("RISK_MODEL_PATH", "~/.stockwatch/models/lgbm_v2_risk.txt")
-        return Path(os.path.expanduser(raw))
+        raw = os.getenv("RISK_MODEL_PATH", "").strip()
+        return Path(os.path.expanduser(raw)) if raw else self.home_dir / "models" / "lgbm_v2_risk.txt"
 
     @property
     def model_scoring_universe(self) -> str:
@@ -357,8 +361,8 @@ class Config:
 
     @property
     def propagation_history_dir(self) -> Path:
-        raw = os.getenv("PROPAGATION_HISTORY_DIR", "~/.stockwatch/history/stocks")
-        return Path(os.path.expanduser(raw))
+        raw = os.getenv("PROPAGATION_HISTORY_DIR", "").strip()
+        return Path(os.path.expanduser(raw)) if raw else self.home_dir / "history" / "stocks"
 
     @property
     def any_v2_enabled(self) -> bool:
@@ -389,9 +393,7 @@ class Config:
     # === 路径 ===
     @property
     def home_dir(self) -> Path:
-        p = Path.home() / ".stockwatch"
-        p.mkdir(exist_ok=True)
-        return p
+        return stockwatch_home()
 
     @property
     def db_path(self) -> Path:

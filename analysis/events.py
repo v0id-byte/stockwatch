@@ -21,6 +21,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 from loguru import logger
+from core.clock import market_today
 
 _CACHE: dict[str, dict] = {}
 
@@ -33,9 +34,7 @@ _NEG_YJYG = {"预减", "首亏", "增亏", "略减", "续亏", "续盈"}
 
 
 def _today() -> date:
-    # date.today() avoided in some sandboxes; loguru-safe wrapper
-    from datetime import datetime
-    return datetime.now().date()
+    return market_today()
 
 
 def _cache_for(key: str, builder):

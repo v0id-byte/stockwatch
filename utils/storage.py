@@ -1,12 +1,15 @@
 """SQLite 持久化层"""
 import json
 import sqlite3
+import threading
+from contextlib import contextmanager
 from datetime import datetime, date, timedelta
 from pathlib import Path
 from typing import Any, Optional
 from loguru import logger
 
 from config import get_config
+from core.clock import market_now, market_today
 
 
 def _row_to_dict(row: tuple, cols: list[str]) -> dict:
@@ -14,6 +17,11 @@ def _row_to_dict(row: tuple, cols: list[str]) -> dict:
 
 
 class Storage:
+    # The desktop Agent is intentionally a single process. Serializing its DB
+    # connections gives SQLite one in-process writer/read transaction at a time;
+    # WAL still protects compatibility with legacy dashboard/source processes.
+    _connection_lock = threading.RLock()
+
     def __init__(self, db_path: Path | None = None):
         if db_path is None:
             cfg = get_config()
@@ -224,6 +232,17 @@ class Storage:
             created_at TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_web_alerts_created ON web_alerts(created_at);
+        CREATE TABLE IF NOT EXISTS scheduled_jobs (
+            job_key TEXT PRIMARY KEY,
+            job_type TEXT NOT NULL,
+            scheduled_for TEXT NOT NULL,
+            status TEXT NOT NULL,
+            claimed_at TEXT NOT NULL,
+            completed_at TEXT,
+            error TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_time
+            ON scheduled_jobs(scheduled_for DESC);
         """)
         self._add_column(conn, "price_alerts", "direction", "direction TEXT NOT NULL DEFAULT 'below'")
         self._add_column(conn, "news", "fetched_at", "fetched_at TEXT")
@@ -239,15 +258,53 @@ class Storage:
         if not self._column_exists(conn, table, column):
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
 
-    def _conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path), timeout=30, check_same_thread=False)
-        # 守护进程（runner/monitor）与 Web 控制台是两个独立进程共用同一个 SQLite，
-        # 又各自多线程访问。默认 rollback-journal 模式下并发写极易 "database is locked"。
-        # 开 WAL 让读写不互斥，busy_timeout 让偶发写锁自动等待而非立刻报错。
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        return conn
+    @contextmanager
+    def _conn(self):
+        with self._connection_lock:
+            conn = sqlite3.connect(str(self.db_path), timeout=30, check_same_thread=False)
+            # WAL keeps legacy source-mode processes compatible while the lock
+            # above enforces a single active connection inside the Agent.
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            try:
+                with conn:
+                    yield conn
+            finally:
+                conn.close()
+
+    def claim_scheduled_job(self, job_key: str, job_type: str, scheduled_for: str) -> bool:
+        """Atomically claim a slot once across restarts and concurrent callers."""
+        with self._conn() as conn:
+            cur = conn.execute(
+                """
+                INSERT OR IGNORE INTO scheduled_jobs
+                    (job_key, job_type, scheduled_for, status, claimed_at)
+                VALUES (?, ?, ?, 'running', ?)
+                """,
+                [job_key, job_type, scheduled_for, market_now().isoformat(timespec="seconds")],
+            )
+        return cur.rowcount == 1
+
+    def finish_scheduled_job(self, job_key: str, error: str | None = None) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                """
+                UPDATE scheduled_jobs
+                SET status=?, completed_at=?, error=?
+                WHERE job_key=?
+                """,
+                ["failed" if error else "completed", market_now().isoformat(timespec="seconds"), error, job_key],
+            )
+
+    def get_recent_scheduled_jobs(self, limit: int = 20) -> list[dict]:
+        with self._conn() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM scheduled_jobs ORDER BY scheduled_for DESC LIMIT ?",
+                [limit],
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def upsert_kline(self, code: str, trade_date: str, row: dict):
         with self._conn() as conn:
@@ -267,7 +324,7 @@ class Storage:
         return [dict(r) for r in rows]
 
     def kline_cached_today(self, code: str) -> bool:
-        today = date.today().isoformat()
+        today = market_today().isoformat()
         with self._conn() as conn:
             row = conn.execute(
                 "SELECT 1 FROM daily_kline WHERE code=? AND trade_date=? LIMIT 1",

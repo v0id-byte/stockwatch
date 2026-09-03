@@ -50,8 +50,8 @@ class TestTrackedAlertReason:
         assert "接近目标" in reason
 
     def test_already_notified_today_no_trigger(self):
-        from datetime import date
-        today = date.today().isoformat()
+        from core.clock import market_today
+        today = market_today().isoformat()
         pos = {"last_notified_at": today, "stop_loss": 10.5, "target_price": None}
         dec = self._base_decision()
         assert _tracked_alert_reason(pos, dec) == ""

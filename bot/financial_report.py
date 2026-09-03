@@ -18,6 +18,7 @@ from datetime import datetime
 from loguru import logger
 
 import akshare as ak
+from core.clock import market_naive_now
 
 from bot.research import (
     StockRef,
@@ -298,7 +299,7 @@ def fetch_report_data(stock: StockRef) -> ReportData:
             symbol=stock.code,
             keyword="年度报告",
             start_date="20220101",
-            end_date=datetime.now().strftime("%Y%m%d"),
+            end_date=market_naive_now().strftime("%Y%m%d"),
         )
         year_count = 0
         for _, row in df.head(8).iterrows():
@@ -325,7 +326,7 @@ def fetch_report_data(stock: StockRef) -> ReportData:
                 symbol=stock.code,
                 keyword=keyword,
                 start_date="20220101",
-                end_date=datetime.now().strftime("%Y%m%d"),
+                end_date=market_naive_now().strftime("%Y%m%d"),
             )
             # 巨潮的 keyword 是模糊匹配，结果里偶尔会有"近义"标题混进来。
             # 严格按标题包含关键词过滤一下，保证三季报不会被一季报顶掉。
@@ -510,7 +511,7 @@ def _candidate_report_dates(kind: str) -> list[str]:
 
     季度规则：03-31 / 06-30 / 09-30；年度规则：12-31。
     """
-    today = datetime.now()
+    today = market_naive_now()
     year = today.year
     if kind == "yjyg":
         return [f"{y}0331" for y in (year, year - 1)]
